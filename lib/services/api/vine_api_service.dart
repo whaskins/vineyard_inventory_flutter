@@ -7,7 +7,7 @@ class VineApiService {
   final String _endpoint = '/vines';
 
   // Get all vines with pagination support
-  Future<List<Vine>> getAllVines({int pageSize = 100, int maxPages = 10}) async {
+  Future<List<Vine>> getAllVines({int pageSize = 1000, int maxPages = 10}) async {
     try {
       List<Vine> allVines = [];
       int currentPage = 0;
@@ -253,7 +253,7 @@ class VineApiService {
           print('DEBUG: Received 409 conflict during creation, attempting to get existing vine');
           try {
             // Try to get the existing vine
-            final existingVine = await getVineByAlphaNumericId(vine.alphaNumericID);
+            final existingVine = vine.hasTag ? await getVineByAlphaNumericId(vine.alphaNumericID!) : null;
             if (existingVine != null) {
               print('DEBUG: Successfully retrieved existing vine after 409');
               return existingVine;
@@ -274,12 +274,79 @@ class VineApiService {
     }
   }
 
+  // Sync vine to backend - handles both tagged and untagged vines
+  Future<Vine> syncVine(Vine vine) async {
+    try {
+      // For vines with tags, use the existing alphaNumericID-based sync
+      if (vine.hasTag) {
+        return await updateVine(vine);
+      }
+      
+      // For vines without tags, use location-based sync
+      return await syncVineByLocation(vine);
+    } catch (e) {
+      print('DEBUG: Error in syncVine: $e');
+      return vine;
+    }
+  }
+  
+  // Sync vine without tag using location information
+  Future<Vine> syncVineByLocation(Vine vine) async {
+    try {
+      if (vine.vineyardName == null || vine.fieldName == null || 
+          vine.rowNumber == null || vine.spotNumber == null) {
+        print('DEBUG: Cannot sync vine without tag - missing location information');
+        throw Exception('Vine without tag must have complete location information');
+      }
+      
+      print('DEBUG: Syncing vine without tag using location: ${vine.vineyardName}/${vine.fieldName}/${vine.rowNumber}/${vine.spotNumber}');
+      
+      // For vines without tags, we need to create/update a VineLocation record
+      final locationData = {
+        'vineyard_name': vine.vineyardName,
+        'field_name': vine.fieldName,
+        'row_number': vine.rowNumber,
+        'spot_number': vine.spotNumber,
+        'year_of_planting': vine.yearOfPlanting,
+        'alpha_numeric_id': null, // No tag for this vine
+      };
+      
+      try {
+        // Use the new vine location sync endpoint
+        final response = await _apiService.put('$_endpoint/locations/sync', locationData);
+        print('DEBUG: Synced vine location without tag');
+        
+        if (response is Map<String, dynamic>) {
+          try {
+            // Convert the VineLocation response back to a Vine model for compatibility
+            final updatedVine = vine.copyWith(
+              id: response['id'],
+              // Keep all existing vine data, just update the ID if needed
+            );
+            return updatedVine;
+          } catch (e) {
+            print('DEBUG: Error parsing synced vine location: $e');
+            return vine;
+          }
+        }
+        
+        return vine;
+      } catch (syncError) {
+        print('DEBUG: Error syncing vine location: $syncError');
+        return vine;
+      }
+    } catch (e) {
+      print('DEBUG: Error in syncVineByLocation: $e');
+      return vine;
+    }
+  }
+  
   // First check if vine exists, then either create or update it
   Future<Vine> updateVine(Vine vine) async {
     try {
-      if (vine.alphaNumericID.isEmpty) {
-        print('DEBUG: Vine alphaNumericID is empty for update operation');
-        throw Exception('Vine alphaNumericID cannot be empty for update operation');
+      if (vine.alphaNumericID == null || vine.alphaNumericID!.isEmpty) {
+        print('DEBUG: Vine alphaNumericID is null/empty - use syncVineByLocation instead');
+        return await syncVineByLocation(vine);
       }
       
       final vineApi = VineApiModel.fromLocalModel(vine);
@@ -455,6 +522,25 @@ class VineApiService {
       print('DEBUG: Vine deletion completed');
     } catch (e) {
       print('DEBUG: Error in deleteVineByAlphaNumericId: $e');
+      rethrow;
+    }
+  }
+  
+  // Create or update a vine location (for untagged vines)
+  Future<Map<String, dynamic>> syncVineLocation(Map<String, dynamic> locationData) async {
+    try {
+      print('DEBUG: Syncing vine location: $locationData');
+      final response = await _apiService.put('$_endpoint/locations/sync', locationData);
+      print('DEBUG: Vine location sync successful');
+      
+      if (response is Map<String, dynamic>) {
+        return response;
+      } else {
+        print('DEBUG: Unexpected response type: ${response.runtimeType}');
+        return locationData;
+      }
+    } catch (e) {
+      print('DEBUG: Error in syncVineLocation: $e');
       rethrow;
     }
   }

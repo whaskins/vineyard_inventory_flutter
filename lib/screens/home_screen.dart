@@ -39,6 +39,22 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoggedIn = _authService.isAuthenticated();
     });
   }
+  
+  // Refresh only local vines (used after background sync completes)
+  Future<void> _refreshLocalVinesOnly() async {
+    try {
+      final vines = await _repository.getLocalVines();
+      debugPrint('Refreshed ${vines.length} local vines after background sync');
+      
+      if (mounted) {
+        setState(() {
+          _recentVines = vines.take(10).toList();
+        });
+      }
+    } catch (e) {
+      debugPrint('Error refreshing local vines: $e');
+    }
+  }
 
   Future<void> _loadRecentVines({bool forceRefresh = false}) async {
     debugPrint('Loading recent vines on home screen');
@@ -70,9 +86,25 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
       
-      // Get all vines and sort by most recently updated (uses API if online)
-      final vines = await _repository.getAllVines();
-      debugPrint('Home screen received ${vines.length} vines from repository');
+      // Get local vines immediately for UI
+      final localVines = await _repository.getLocalVines();
+      debugPrint('Home screen received ${localVines.length} local vines');
+      
+      // Start background sync if online (don't await - let it run independently)
+      if (_isOnline && _isLoggedIn) {
+        debugPrint('Starting background vine sync');
+        _repository.startBackgroundVineSync().then((_) {
+          debugPrint('Background vine sync completed');
+          // Refresh UI after sync completes (only if still on this screen)
+          if (mounted) {
+            _refreshLocalVinesOnly();
+          }
+        }).catchError((error) {
+          debugPrint('Background vine sync error: $error');
+        });
+      }
+      
+      final vines = localVines;
       
       // Log the vines for debugging (sample vines only)
       final sampleVines = vines.take(3).toList();
@@ -448,7 +480,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                       vertical: 4.0,
                                     ),
                                     child: ListTile(
-                                      title: Text(vine.alphaNumericID),
+                                      title: Text(vine.hasTag ? vine.alphaNumericID! : 'No Tag'),
                                       subtitle: Text(
                                         [
                                           vine.variety ?? 'Unknown Variety',
@@ -469,7 +501,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                       trailing: const Icon(Icons.chevron_right),
                                       onTap: () =>
-                                          _navigateToVineDetail(vine.alphaNumericID),
+                                          _navigateToVineDetail(vine.uniqueIdentifier),
                                     ),
                                   );
                                 },

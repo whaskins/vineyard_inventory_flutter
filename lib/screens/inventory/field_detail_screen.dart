@@ -391,7 +391,7 @@ class _FieldDetailScreenState extends State<FieldDetailScreen> {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (context) => VineDetailScreen(vineId: vine.alphaNumericID),
+                              builder: (context) => VineDetailScreen(vineId: vine.uniqueIdentifier),
                             ),
                           );
                         },

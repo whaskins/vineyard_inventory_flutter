@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -8,17 +9,27 @@ import 'services/repository.dart';
 import 'package:http/http.dart' as http;
 import 'config/api_config.dart';
 import 'dart:convert';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Set preferred orientations
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
+  // Initialize for web if needed
+  if (kIsWeb) {
+    // Initialize FFI for web support
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
   
-  // Test API endpoints
+  // Set preferred orientations (skip on web)
+  if (!kIsWeb) {
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  }
+  
+  // Test API endpoints 
   await _testApiEndpoints();
   
   // Initialize the repository (handles both local and API data)

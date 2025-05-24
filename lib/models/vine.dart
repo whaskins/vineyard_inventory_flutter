@@ -1,6 +1,6 @@
 class Vine {
   final int? id; // Database ID
-  final String alphaNumericID; // QR code identifier
+  final String? alphaNumericID; // QR code identifier (nullable for vines without tags)
   final int? yearOfPlanting;
   final String? nursery;
   final String? variety;
@@ -15,7 +15,7 @@ class Vine {
 
   Vine({
     this.id,
-    required this.alphaNumericID,
+    this.alphaNumericID,
     this.yearOfPlanting,
     this.nursery,
     this.variety,
@@ -28,6 +28,7 @@ class Vine {
     this.dateDied,
     DateTime? recordCreated,
   }) : recordCreated = recordCreated ?? DateTime.now();
+
 
   // Create a Vine from a Map (database)
   factory Vine.fromMap(Map<String, dynamic> map) {
@@ -101,4 +102,24 @@ class Vine {
       recordCreated: recordCreated ?? this.recordCreated,
     );
   }
+  
+  // Helper method to generate a unique identifier for vines without tags
+  String get uniqueIdentifier {
+    if (alphaNumericID != null && alphaNumericID!.isNotEmpty) {
+      return alphaNumericID!;
+    }
+    
+    // For vines without tags, use location-based identifier
+    if (vineyardName != null && fieldName != null && rowNumber != null && spotNumber != null) {
+      return '${vineyardName}_${fieldName}_${rowNumber}_$spotNumber';
+    }
+    
+    // Fallback to ID-based identifier
+    return 'vine_${id ?? 'new'}';
+  }
+  
+  // Check if this vine has a QR tag
+  bool get hasTag => alphaNumericID != null && 
+                     alphaNumericID!.isNotEmpty && 
+                     !alphaNumericID!.startsWith('UNTAGGED_');
 }

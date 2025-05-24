@@ -403,7 +403,7 @@ class _VarietyListScreenState extends State<VarietyListScreen> {
                               context,
                               MaterialPageRoute(
                                 builder: (context) => VineDetailScreen(
-                                  vineId: vine.alphaNumericID,
+                                  vineId: vine.uniqueIdentifier,
                                 ),
                               ),
                             ).then((_) => _loadVarietyData());

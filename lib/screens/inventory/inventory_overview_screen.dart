@@ -20,6 +20,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
   Map<String, int> _varietyCounts = {};
   Map<String, int> _vineyardCounts = {};
   Map<String, int> _healthCounts = {};
+  List<Map<String, dynamic>> _untaggedVines = [];
   String? _errorMessage;
 
   @override
@@ -77,6 +78,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
         _inventoryService.getVarietySummary(),
         _inventoryService.getVineyardSummary(),
         _inventoryService.getHealthSummary(),
+        _loadUntaggedVines(),
       ]);
 
       setState(() {
@@ -84,6 +86,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
         _varietyCounts = results[1] as Map<String, int>;
         _vineyardCounts = results[2] as Map<String, int>;
         _healthCounts = results[3] as Map<String, int>;
+        _untaggedVines = results[4] as List<Map<String, dynamic>>;
         _isLoading = false;
       });
     } catch (e) {
@@ -91,6 +94,53 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
         _errorMessage = 'Error loading inventory data: $e';
         _isLoading = false;
       });
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _loadUntaggedVines() async {
+    try {
+      // Get all vines from the repository
+      final allVines = await _repository.getAllVines();
+      print('DEBUG: Total vines loaded: ${allVines.length}');
+      
+      // Debug: Check some vine IDs to see the pattern
+      if (allVines.isNotEmpty) {
+        print('DEBUG: Sample vine IDs: ${allVines.take(5).map((v) => v.alphaNumericID).join(', ')}');
+      }
+      
+      // Filter for untagged vines (those with UNTAGGED_ prefix)
+      final untaggedVines = allVines
+          .where((vine) => !vine.hasTag)
+          .map((vine) => {
+            'vineyard': vine.vineyardName ?? 'Unknown',
+            'field': vine.fieldName ?? 'Unknown',
+            'row': vine.rowNumber ?? 0,
+            'spot': vine.spotNumber ?? 0,
+            'yearPlanted': vine.yearOfPlanting ?? 0,
+            'age': vine.yearOfPlanting != null ? DateTime.now().year - vine.yearOfPlanting! : 0,
+          })
+          .toList();
+      
+      print('DEBUG: Found ${untaggedVines.length} untagged vines');
+      
+      // Sort by vineyard, field, row, then spot
+      untaggedVines.sort((a, b) {
+        int vineyardCompare = (a['vineyard'] as String).compareTo(b['vineyard'] as String);
+        if (vineyardCompare != 0) return vineyardCompare;
+        
+        int fieldCompare = (a['field'] as String).compareTo(b['field'] as String);
+        if (fieldCompare != 0) return fieldCompare;
+        
+        int rowCompare = (a['row'] as int).compareTo(b['row'] as int);
+        if (rowCompare != 0) return rowCompare;
+        
+        return (a['spot'] as int).compareTo(b['spot'] as int);
+      });
+      
+      return untaggedVines;
+    } catch (e) {
+      print('Error loading untagged vines: $e');
+      return [];
     }
   }
 
@@ -305,6 +355,87 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
               ),
             ),
           ),
+
+          // Untagged Vines section
+          if (_untaggedVines.isNotEmpty)
+            Card(
+              elevation: 2,
+              margin: const EdgeInsets.only(bottom: 16),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.local_florist, color: Colors.orange[700]),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Untagged Vines (${_untaggedVines.length})',
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Vines that exist but need QR tags:',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ...(_untaggedVines.take(10).map((vine) => Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              '${vine['vineyard']} - ${vine['field']}',
+                              style: const TextStyle(fontWeight: FontWeight.w500),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Text(
+                              'Row ${vine['row']}, Spot ${vine['spot']}',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 1,
+                            child: Text(
+                              '${vine['age']}y old',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey[600],
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ))),
+                    if (_untaggedVines.length > 10)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8.0),
+                        child: Text(
+                          '... and ${_untaggedVines.length - 10} more',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey[600],
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
 
           // Action buttons
           Row(

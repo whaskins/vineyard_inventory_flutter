@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:http/http.dart' as http;
 
 import '../models/vine.dart';
 import '../models/maintenance.dart';
@@ -94,11 +96,24 @@ class Repository {
   
   // Check if device is online
   Future<bool> _checkConnectivity() async {
-    try {
-      final result = await InternetAddress.lookup('example.com');
-      return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
-    } on SocketException catch (_) {
-      return false;
+    // For web, always assume online for now - we'll check later with actual requests
+    if (kIsWeb) {
+      try {
+        // Use a simple HTTP request instead of InternetAddress lookup for web
+        final response = await http.get(Uri.parse('https://www.google.com'));
+        return response.statusCode == 200;
+      } catch (e) {
+        print('DEBUG: Web connectivity check failed: $e');
+        return false;
+      }
+    } else {
+      // For mobile, use the usual approach
+      try {
+        final result = await InternetAddress.lookup('example.com');
+        return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+      } on SocketException catch (_) {
+        return false;
+      }
     }
   }
   
@@ -477,7 +492,75 @@ class Repository {
     return vine;
   }
   
+  // Get vines from local database only (fast, non-blocking)
+  Future<List<Vine>> getLocalVines() async {
+    return await _databaseService.getAllVines();
+  }
+  
+  // Start background vine sync (non-blocking)
+  Future<void> startBackgroundVineSync() async {
+    if (!_isOnline || !_authService.isAuthenticated()) {
+      print('DEBUG: Cannot start background sync - offline or not authenticated');
+      return;
+    }
+    
+    print('DEBUG: Starting background vine sync');
+    
+    try {
+      // Get API vines in background
+      List<Vine> apiVines = await _vineApiService.getAllVines();
+      print('DEBUG: Background sync fetched ${apiVines.length} vines from API');
+      
+      // Get current local vines for comparison
+      List<Vine> localVines = await _databaseService.getAllVines();
+      print('DEBUG: Background sync comparing with ${localVines.length} local vines');
+      
+      // Create a map of local vines by alphaNumericID for easier lookup
+      final Map<String, Vine> localVineMap = {
+        for (var vine in localVines) vine.uniqueIdentifier: vine
+      };
+      
+      int inserted = 0;
+      int updated = 0;
+      
+      // Process each API vine
+      for (var apiVine in apiVines) {
+        // Clean up variety field first - convert empty strings to null
+        Vine cleanApiVine = apiVine;
+        if (apiVine.variety != null && apiVine.variety!.trim().isEmpty) {
+          cleanApiVine = apiVine.copyWith(variety: null);
+        }
+        
+        final Vine? localVine = localVineMap[cleanApiVine.alphaNumericID];
+        
+        if (localVine == null) {
+          // Vine exists in API but not locally - insert it
+          await _databaseService.insertVine(cleanApiVine);
+          inserted++;
+        } else {
+          // Check if we should update (same logic as before but simplified)
+          bool shouldUpdate = cleanApiVine.recordCreated.isAfter(
+            localVine.recordCreated.add(const Duration(seconds: 5))
+          );
+          
+          if (shouldUpdate) {
+            // Create updated vine with local ID but API data
+            Vine updatedVine = cleanApiVine.copyWith(id: localVine.id);
+            await _databaseService.updateVine(updatedVine);
+            updated++;
+          }
+        }
+      }
+      
+      print('DEBUG: Background sync completed - inserted: $inserted, updated: $updated');
+    } catch (e) {
+      print('DEBUG: Error in background vine sync: $e');
+      rethrow;
+    }
+  }
+
   Future<List<Vine>> getAllVines() async {
+    
     // Get vines from local database
     List<Vine> localVines = await _databaseService.getAllVines();
     print('Local DB has ${localVines.length} vines');
@@ -491,7 +574,7 @@ class Repository {
         
         // Create a map of local vines by alphaNumericID for easier lookup
         final Map<String, Vine> localVineMap = {
-          for (var vine in localVines) vine.alphaNumericID: vine
+          for (var vine in localVines) vine.uniqueIdentifier: vine
         };
         
         // Update or insert each API vine in local database with timestamp conflict resolution
@@ -631,6 +714,27 @@ class Repository {
     return localVine;
   }
   
+  // Insert vine location (for untagged vines in row scan mode)
+  Future<Map<String, dynamic>> insertVineLocation(Map<String, dynamic> locationData) async {
+    print('DEBUG: Inserting vine location in repository: $locationData');
+    
+    // If online and authenticated, insert into API
+    if (_isOnline && _authService.isAuthenticated()) {
+      print('DEBUG: Online and authenticated, creating vine location in API');
+      try {
+        Map<String, dynamic> apiResponse = await _vineApiService.syncVineLocation(locationData);
+        print('DEBUG: API vine location creation successful: $apiResponse');
+        return apiResponse;
+      } catch (e) {
+        print('DEBUG: API error creating vine location: $e');
+        throw e;
+      }
+    } else {
+      print('DEBUG: Offline or not authenticated, cannot create vine location. Online: $_isOnline, Auth: ${_authService.isAuthenticated()}');
+      throw Exception('Cannot create vine location - offline or not authenticated');
+    }
+  }
+  
   Future<Vine> updateVine(Vine vine) async {
     // Update local database
     print('DEBUG: Updating vine in repository: ${vine.alphaNumericID}, ID: ${vine.id}');
@@ -641,39 +745,14 @@ class Repository {
     if (_isOnline && _authService.isAuthenticated()) {
       print('DEBUG: Online and authenticated, updating vine in API');
       try {
-        // First try to get the vine directly to check if it exists
-        try {
-          print('DEBUG: Pre-checking if vine exists in API before update');
-          Vine? existingVine = await _vineApiService.getVineByAlphaNumericId(vine.alphaNumericID);
-          
-          if (existingVine != null) {
-            print('DEBUG: Vine exists in API check, using updateVine');
-            Vine apiVine = await _vineApiService.updateVine(vine);
-            print('DEBUG: API update successful, returned ID: ${apiVine.id}');
-            
-            // Update local vine with API vine
-            await _databaseService.updateVine(apiVine);
-            return apiVine;
-          } else {
-            // If it doesn't exist, explicitly try to create it
-            print('DEBUG: Vine not found in API pre-check, using createVine');
-            Vine apiVine = await _vineApiService.createVine(vine);
-            print('DEBUG: API create successful, returned ID: ${apiVine.id}');
-            
-            // Update local vine with API vine
-            await _databaseService.updateVine(apiVine);
-            return apiVine;
-          }
-        } catch (preCheckError) {
-          // If pre-check fails, try the normal updateVine which has its own logic
-          print('DEBUG: API pre-check failed, falling back to regular updateVine: $preCheckError');
-          Vine apiVine = await _vineApiService.updateVine(vine);
-          print('DEBUG: API update successful, returned ID: ${apiVine.id}');
-          
-          // Update local vine with API vine
-          await _databaseService.updateVine(apiVine);
-          return apiVine;
-        }
+        // Use the new syncVine method which handles both tagged and untagged vines
+        print('DEBUG: Syncing vine to API using syncVine method');
+        Vine apiVine = await _vineApiService.syncVine(vine);
+        print('DEBUG: API sync successful, returned ID: ${apiVine.id}');
+        
+        // Update local vine with API vine
+        await _databaseService.updateVine(apiVine);
+        return apiVine;
       } catch (e) {
         // Log the error but continue
         print('DEBUG: API error updating vine: $e');
@@ -683,7 +762,8 @@ class Repository {
           print('DEBUG: Received 409 conflict - vine exists but couldn\'t be updated');
           try {
             // Try one more time to get the current state of the vine from API
-            Vine? currentVine = await _vineApiService.getVineByAlphaNumericId(vine.alphaNumericID);
+            // For 409 conflicts, try to sync again since the vine might exist
+            Vine? currentVine = await _vineApiService.syncVine(vine);
             if (currentVine != null) {
               print('DEBUG: Retrieved existing vine after 409 conflict');
               // Update local DB with current API state
@@ -717,7 +797,15 @@ class Repository {
     if (_isOnline && _authService.isAuthenticated() && vine != null) {
       try {
         // Use alphanumeric ID for API deletion
-        await _vineApiService.deleteVineByAlphaNumericId(vine.alphaNumericID);
+        // Only delete by alphanumeric ID if the vine has a tag
+        if (vine.hasTag) {
+          await _vineApiService.deleteVineByAlphaNumericId(vine.alphaNumericID!);
+        } else {
+          // For vines without tags, delete by numeric ID if available
+          if (vine.id != null) {
+            await _vineApiService.deleteVine(vine.id!);
+          }
+        }
       } catch (e) {
         // If API call fails, continue
         print('DEBUG: API error deleting vine: $e');
@@ -1479,10 +1567,18 @@ class Repository {
           }
           
           try {
-            // First check if vine exists in API
-            final existingApiVine = await _vineApiService.getVineByAlphaNumericId(localVine.alphaNumericID);
+            // Check if vine exists in API (handle both tagged and untagged vines)
+            Vine? existingApiVine;
             
-            if (existingApiVine != null) {
+            if (localVine.hasTag) {
+              // For vines with tags, check by alphaNumericID
+              existingApiVine = await _vineApiService.getVineByAlphaNumericId(localVine.alphaNumericID!);
+            } else {
+              // For vines without tags, we'll need to use the sync method which handles location-based lookup
+              print('DEBUG: Vine without tag found: ${localVine.uniqueIdentifier}, will use syncVine method');
+            }
+            
+            if (existingApiVine != null && localVine.hasTag) {
               // Compare timestamps to determine which version is newer
               bool localIsNewer = false;
               
@@ -1494,14 +1590,14 @@ class Repository {
                   existingApiVine.recordCreated.add(const Duration(seconds: 5))
                 );
                 
-                print('DEBUG: Timestamp comparison for ${localVine.alphaNumericID}: '
+                print('DEBUG: Timestamp comparison for ${localVine.uniqueIdentifier}: '
                     'Local: ${localVine.recordCreated}, '
                     'API: ${existingApiVine.recordCreated}, '
                     'Local is newer: $localIsNewer');
               } else {
                 // If API vine has no timestamp, assume local is newer (safer option)
                 localIsNewer = true;
-                print('DEBUG: API vine ${localVine.alphaNumericID} has no timestamp, assuming local is newer');
+                print('DEBUG: API vine ${localVine.uniqueIdentifier} has no timestamp, assuming local is newer');
               }
               
               // Compare data to see if we need to update
@@ -1514,49 +1610,49 @@ class Repository {
               if (dataIsDifferent) {
                 if (localIsNewer) {
                   // Local data is newer, update API
-                  print('DEBUG: Local vine ${localVine.alphaNumericID} is newer than API, updating API');
+                  print('DEBUG: Local vine ${localVine.uniqueIdentifier} is newer than API, updating API');
                   await _vineApiService.updateVine(localVine);
                   syncCount++;
-                  print('DEBUG: Successfully updated API with newer local data for ${localVine.alphaNumericID}');
+                  print('DEBUG: Successfully updated API with newer local data for ${localVine.uniqueIdentifier}');
                 } else {
                   // API data is newer, update local
-                  print('DEBUG: API vine ${localVine.alphaNumericID} is newer than local, updating local database');
+                  print('DEBUG: API vine ${localVine.uniqueIdentifier} is newer than local, updating local database');
                   await _databaseService.updateVine(existingApiVine);
-                  print('DEBUG: Successfully updated local database with newer API data for ${localVine.alphaNumericID}');
+                  print('DEBUG: Successfully updated local database with newer API data for ${localVine.uniqueIdentifier}');
                 }
               } else {
-                print('DEBUG: Vine ${localVine.alphaNumericID} data is identical in API and local, no update needed');
+                print('DEBUG: Vine ${localVine.uniqueIdentifier} data is identical in API and local, no update needed');
               }
             } else {
-              // Vine doesn't exist in API, create it
-              print('DEBUG: Vine ${localVine.alphaNumericID} not in API, creating');
-              await _vineApiService.createVine(localVine);
+              // Vine doesn't exist in API, or vine without tag - use syncVine method
+              print('DEBUG: Vine ${localVine.uniqueIdentifier} not in API or is untagged, syncing with API');
+              await _vineApiService.syncVine(localVine);
               syncCount++;
-              print('DEBUG: Successfully created vine ${localVine.alphaNumericID}');
+              print('DEBUG: Successfully synced vine ${localVine.uniqueIdentifier}');
             }
           } catch (e) {
             // Handle 404 "Not Found" errors specifically - this indicates the vine doesn't exist
             if (e.toString().contains('404') || e.toString().contains('not found')) {
-              print('DEBUG: Vine ${localVine.alphaNumericID} confirmed not in API, creating it');
+              print('DEBUG: Vine ${localVine.uniqueIdentifier} confirmed not in API, syncing it');
               
               try {
-                // Create a new vine in the API directly
-                await _vineApiService.createVine(localVine);
+                // Use syncVine method which handles both tagged and untagged vines
+                await _vineApiService.syncVine(localVine);
                 syncCount++;
-                print('DEBUG: Successfully created new vine ${localVine.alphaNumericID} after 404');
+                print('DEBUG: Successfully synced new vine ${localVine.uniqueIdentifier} after 404');
               } catch (createError) {
                 print('DEBUG: Failed to create vine after 404: $createError');
-                failedVines.add(localVine.alphaNumericID);
+                failedVines.add(localVine.uniqueIdentifier);
               }
             } else {
               // For other API errors, add to failed vines
-              print('DEBUG: Non-404 error checking vine ${localVine.alphaNumericID}: $e');
-              failedVines.add(localVine.alphaNumericID);
+              print('DEBUG: Non-404 error checking vine ${localVine.uniqueIdentifier}: $e');
+              failedVines.add(localVine.uniqueIdentifier);
             }
           }
         } catch (e) {
-          print('DEBUG: Unexpected error syncing vine ${localVine.alphaNumericID}: $e');
-          failedVines.add(localVine.alphaNumericID);
+          print('DEBUG: Unexpected error syncing vine ${localVine.uniqueIdentifier}: $e');
+          failedVines.add(localVine.uniqueIdentifier);
           // Continue with next vine even if one fails
         }
       }

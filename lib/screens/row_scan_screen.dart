@@ -261,6 +261,115 @@ class _RowScanScreenState extends State<RowScanScreen> {
     }
   }
 
+  // Show dialog to select vine age for untagged vines
+  Future<void> _showAgeSelectionDialog() async {
+    final currentYear = DateTime.now().year;
+    
+    if (_vineyardNameController.text.isEmpty || 
+        _fieldNameController.text.isEmpty || 
+        _rowNumberController.text.isEmpty) {
+      setState(() {
+        _errorMessage = "Please fill in vineyard, field, and row information before adding vines.";
+      });
+      return;
+    }
+
+    final int? selectedAge = await showDialog<int>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Vine Age'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('A vine exists at position $_currentSpotNumber but has no tag.'),
+              const SizedBox(height: 16),
+              const Text('How old is this vine?'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(1),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('1 Year Old'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(2),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('2 Years Old'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (selectedAge != null) {
+      await _createUntaggedVine(selectedAge);
+    }
+  }
+
+  // Create a vine location record without a QR tag
+  Future<void> _createUntaggedVine(int ageInYears) async {
+    try {
+      final currentYear = DateTime.now().year;
+      final plantingYear = currentYear - ageInYears;
+      
+      // For untagged vines, create a vine location record (not a vine record)
+      final locationData = {
+        'vineyard_name': _vineyardNameController.text,
+        'field_name': _fieldNameController.text,
+        'row_number': int.parse(_rowNumberController.text),
+        'spot_number': _currentSpotNumber,
+        'year_of_planting': plantingYear,
+        'alpha_numeric_id': null, // No tag for this location
+      };
+      
+      print('DEBUG: Creating untagged vine location: ${locationData}');
+
+      // Save directly to backend via API (since this is vine location, not vine)
+      print('DEBUG: Repository online status: ${_repository.isOnline}');
+      await _repository.insertVineLocation(locationData);
+      print('DEBUG: Vine location insertion completed');
+      
+      // Provide vibration feedback
+      await _triggerVibration();
+      
+      // Move to next position
+      final nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
+      
+      setState(() {
+        _successMessage = 'Created untagged vine (${ageInYears}y old) at position $_currentSpotNumber. Ready for position $nextPosition';
+        _currentSpotNumber = nextPosition;
+        _errorMessage = null;
+      });
+      
+      // Brief pause before continuing
+      _pauseScanner();
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (mounted) {
+          _resumeScanner();
+        }
+      });
+      
+    } catch (e) {
+      setState(() {
+        _errorMessage = "Error creating vine: $e";
+        _successMessage = null;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -313,18 +422,31 @@ class _RowScanScreenState extends State<RowScanScreen> {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          // Row information section
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            height: _showSettings ? 320 : 60,
-            padding: const EdgeInsets.all(16.0),
-            decoration: BoxDecoration(
-              color: Colors.green[50],
-              border: Border(bottom: BorderSide(color: Colors.green[200]!)),
+      body: GestureDetector(
+        onTap: () {
+          // Dismiss keyboard when tapping outside of text fields
+          FocusScope.of(context).unfocus();
+        },
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: MediaQuery.of(context).size.height - AppBar().preferredSize.height - MediaQuery.of(context).padding.top,
             ),
-            child: SingleChildScrollView(
+            child: Column(
+            children: [
+              // Row information section
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                constraints: BoxConstraints(
+                  minHeight: 60,
+                  maxHeight: _showSettings ? 320 : 60,
+                ),
+                padding: const EdgeInsets.all(16.0),
+                decoration: BoxDecoration(
+                  color: Colors.green[50],
+                  border: Border(bottom: BorderSide(color: Colors.green[200]!)),
+                ),
+                child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -469,8 +591,8 @@ class _RowScanScreenState extends State<RowScanScreen> {
           ),
           
           // Scanner section
-          Expanded(
-            flex: 5,
+          Container(
+            height: 400, // Fixed height for scanner
             child: Stack(
               alignment: Alignment.center,
               children: [
@@ -680,10 +802,33 @@ class _RowScanScreenState extends State<RowScanScreen> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 12),
+                
+                // Vine exists but no tag button
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _showAgeSelectionDialog,
+                    icon: const Icon(Icons.local_florist),
+                    label: const Text('Vine Exists But No Tag'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.purple,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      textStyle: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
-        ],
+            ],
+          ),
+        ),
+        ),
       ),
     );
   }

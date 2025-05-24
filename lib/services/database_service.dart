@@ -3,6 +3,10 @@ import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:sqflite/sqlite_api.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqflite_common/sqlite_api.dart';
 
 import '../models/vine.dart';
 import '../models/maintenance.dart';
@@ -25,44 +29,125 @@ class DatabaseService {
   
   // Initialize database
   Future<Database> _initDatabase() async {
-    Directory documentsDirectory = await getApplicationDocumentsDirectory();
-    String path = join(documentsDirectory.path, 'vineyard_inventory.db');
-    debugPrint('Initializing database at path: $path');
+    String path;
     
-    try {
-      final db = await openDatabase(
+    if (kIsWeb) {
+      // For web platform, use in-memory database
+      debugPrint('Running on web, using in-memory database');
+      
+      // Initialize FFI for web
+      sqfliteFfiInit();
+      var databaseFactory = databaseFactoryFfi;
+      
+      // Use a temporary path for web
+      path = 'vineyard_inventory_web.db';
+      debugPrint('Initializing web database with path: $path');
+      
+      final db = await databaseFactory.openDatabase(
         path,
-        version: 2,
-        onCreate: _createDatabase,
-        onUpgrade: _upgradeDatabase,
+        options: OpenDatabaseOptions(
+          version: 3,
+          onCreate: _onCreate,
+          onUpgrade: _onUpgrade,
+        ),
       );
-      debugPrint('Database initialized successfully');
       return db;
-    } catch (e, stackTrace) {
-      debugPrint('Error initializing database: $e');
-      debugPrint('Stack trace: $stackTrace');
-      rethrow;
+    } else {
+      // For mobile platforms, use file-based database
+      Directory documentsDirectory = await getApplicationDocumentsDirectory();
+      path = join(documentsDirectory.path, 'vineyard_inventory.db');
+      debugPrint('Initializing mobile database at path: $path');
+      
+      try {
+        final db = await openDatabase(
+          path,
+          version: 3,
+          onCreate: _onCreate,
+          onUpgrade: _onUpgrade,
+        );
+        debugPrint('Database initialized successfully');
+        return db;
+      } catch (e, stackTrace) {
+        debugPrint('Error initializing database: $e');
+        debugPrint('Stack trace: $stackTrace');
+        rethrow;
+      }
     }
+  }
+  
+  // Database creation
+  Future<void> _onCreate(Database db, int version) async {
+    return _createDatabase(db, version);
+  }
+  
+  // Database upgrade
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    return _upgradeDatabase(db, oldVersion, newVersion);
   }
   
   // Database migration for schema updates
   Future<void> _upgradeDatabase(Database db, int oldVersion, int newVersion) async {
     debugPrint('Upgrading database from version $oldVersion to $newVersion');
     
-    if (oldVersion == 1 && newVersion == 2) {
+    if (oldVersion == 1 && newVersion >= 2) {
       // Add photoUrl column to vineIssues table for version 2
       await db.execute('ALTER TABLE vineIssues ADD COLUMN photoUrl TEXT');
       debugPrint('Added photoUrl column to vineIssues table');
+    }
+    
+    if (oldVersion <= 2 && newVersion >= 3) {
+      // Update vines table to allow nullable alphaNumericID for version 3
+      debugPrint('Migrating vines table to support nullable alphaNumericID');
+      
+      // Create new table with nullable alphaNumericID
+      await db.execute('''
+        CREATE TABLE vines_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          alphaNumericID TEXT,
+          yearOfPlanting INTEGER,
+          nursery TEXT,
+          variety TEXT,
+          rootstock TEXT,
+          vineyardName TEXT,
+          fieldName TEXT,
+          rowNumber INTEGER,
+          spotNumber INTEGER,
+          isDead INTEGER NOT NULL DEFAULT 0,
+          dateDied TEXT,
+          recordCreated TEXT NOT NULL
+        )
+      ''');
+      
+      // Copy data from old table to new table
+      await db.execute('''
+        INSERT INTO vines_new (id, alphaNumericID, yearOfPlanting, nursery, variety, rootstock, 
+                              vineyardName, fieldName, rowNumber, spotNumber, isDead, dateDied, recordCreated)
+        SELECT id, alphaNumericID, yearOfPlanting, nursery, variety, rootstock, 
+               vineyardName, fieldName, rowNumber, spotNumber, isDead, dateDied, recordCreated
+        FROM vines
+      ''');
+      
+      // Drop old table and rename new table
+      await db.execute('DROP TABLE vines');
+      await db.execute('ALTER TABLE vines_new RENAME TO vines');
+      
+      // Add unique constraint for alphaNumericID when not null
+      await db.execute('CREATE UNIQUE INDEX idx_vines_alpha_numeric_id ON vines(alphaNumericID) WHERE alphaNumericID IS NOT NULL');
+      
+      // Add unique constraint for location when alphaNumericID is null
+      await db.execute('CREATE UNIQUE INDEX idx_vines_location ON vines(vineyardName, fieldName, rowNumber, spotNumber) WHERE alphaNumericID IS NULL');
+      
+      debugPrint('Successfully migrated vines table to support nullable alphaNumericID');
     }
   }
   
   // Create database tables
   Future<void> _createDatabase(Database db, int version) async {
-    // Vines table
+    // Vines table (version 3+ with nullable alphaNumericID)
     await db.execute('''
       CREATE TABLE vines (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        alphaNumericID TEXT UNIQUE NOT NULL,
+        alphaNumericID TEXT,
         yearOfPlanting INTEGER,
         nursery TEXT,
         variety TEXT,
@@ -76,6 +161,12 @@ class DatabaseService {
         recordCreated TEXT NOT NULL
       )
     ''');
+    
+    // Add unique constraint for alphaNumericID when not null
+    await db.execute('CREATE UNIQUE INDEX idx_vines_alpha_numeric_id ON vines(alphaNumericID) WHERE alphaNumericID IS NOT NULL');
+    
+    // Add unique constraint for location when alphaNumericID is null
+    await db.execute('CREATE UNIQUE INDEX idx_vines_location ON vines(vineyardName, fieldName, rowNumber, spotNumber) WHERE alphaNumericID IS NULL');
     
     // Maintenance types table
     await db.execute('''
@@ -176,14 +267,51 @@ class DatabaseService {
     }
   }
   
+  // Get vine by location (for vines without tags)
+  Future<Vine?> getVineByLocation(String vineyardName, String fieldName, int rowNumber, int spotNumber) async {
+    Database db = await database;
+    debugPrint('Looking up vine by location: $vineyardName/$fieldName/$rowNumber/$spotNumber');
+    
+    try {
+      final List<Map<String, dynamic>> maps = await db.query(
+        'vines',
+        where: 'vineyardName = ? AND fieldName = ? AND rowNumber = ? AND spotNumber = ?',
+        whereArgs: [vineyardName, fieldName, rowNumber, spotNumber],
+      );
+      
+      debugPrint('Query returned ${maps.length} results');
+      
+      if (maps.isNotEmpty) {
+        final vine = Vine.fromMap(maps.first);
+        debugPrint('Found vine at location: vineyard=$vineyardName, field=$fieldName, row=$rowNumber, spot=$spotNumber, ID: ${vine.id}');
+        return vine;
+      }
+      debugPrint('No vine found at location: $vineyardName/$fieldName/$rowNumber/$spotNumber');
+      return null;
+    } catch (e, stackTrace) {
+      debugPrint('Error looking up vine by location: $e');
+      debugPrint('Stack trace: $stackTrace');
+      rethrow;
+    }
+  }
+  
   // Update a vine
   Future<int> updateVine(Vine vine) async {
     Database db = await database;
     debugPrint('Updating vine in database: ${vine.alphaNumericID} with ID: ${vine.id}');
     
     try {
-      // First, check if this alphaNumericID already exists
-      Vine? existingVine = await getVineByAlphaNumericID(vine.alphaNumericID);
+      // Check for existing vine based on alphaNumericID or location
+      Vine? existingVine;
+      
+      if (vine.hasTag) {
+        // For vines with tags, check by alphaNumericID
+        existingVine = await getVineByAlphaNumericID(vine.alphaNumericID!);
+      } else if (vine.vineyardName != null && vine.fieldName != null && 
+                 vine.rowNumber != null && vine.spotNumber != null) {
+        // For vines without tags, check by location
+        existingVine = await getVineByLocation(vine.vineyardName!, vine.fieldName!, vine.rowNumber!, vine.spotNumber!);
+      }
       
       if (existingVine != null) {
         if (existingVine.id != vine.id) {

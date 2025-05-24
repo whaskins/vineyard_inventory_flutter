@@ -2,7 +2,7 @@ import '../vine.dart';
 
 class VineApiModel {
   final int? id;
-  final String alphaNumericID;
+  final String? alphaNumericID; // Nullable for vines without tags
   final int? yearOfPlanting;
   final String? nursery;
   final String? variety;
@@ -18,7 +18,7 @@ class VineApiModel {
 
   VineApiModel({
     this.id,
-    required this.alphaNumericID,
+    this.alphaNumericID,
     this.yearOfPlanting,
     this.nursery,
     this.variety,
@@ -38,25 +38,41 @@ class VineApiModel {
     try {
       print('DEBUG: Parsing VineApiModel from JSON: $json');
       
+      // Extract location data from locations array (new schema)
+      String? vineyardName;
+      String? fieldName;
+      int? rowNumber;
+      int? spotNumber;
+      
+      final List<dynamic>? locations = json['locations'];
+      if (locations != null && locations.isNotEmpty) {
+        // Use the first location if available
+        final location = locations.first as Map<String, dynamic>;
+        vineyardName = location['vineyard_name']?.toString();
+        fieldName = location['field_name']?.toString();
+        rowNumber = location['row_number'] is int 
+          ? location['row_number'] 
+          : int.tryParse(location['row_number']?.toString() ?? '');
+        spotNumber = location['spot_number'] is int 
+          ? location['spot_number'] 
+          : int.tryParse(location['spot_number']?.toString() ?? '');
+      }
+      
       // Ensure all required fields exist, with defaults as needed
       // Use null-aware operators and handle potential type issues
       return VineApiModel(
         id: json['id'] is int ? json['id'] : (int.tryParse(json['id']?.toString() ?? '') ?? json['vine_id']),
-        alphaNumericID: json['alpha_numeric_id']?.toString() ?? 'unknown-id',
+        alphaNumericID: json['alpha_numeric_id']?.toString(),
         yearOfPlanting: json['year_of_planting'] is int 
           ? json['year_of_planting'] 
           : int.tryParse(json['year_of_planting']?.toString() ?? ''),
         nursery: json['nursery']?.toString(),
         variety: json['variety']?.toString(),
         rootstock: json['rootstock']?.toString(),
-        vineyardName: json['vineyard_name']?.toString(),
-        fieldName: json['field_name']?.toString(),
-        rowNumber: json['row_number'] is int 
-          ? json['row_number'] 
-          : int.tryParse(json['row_number']?.toString() ?? ''),
-        spotNumber: json['spot_number'] is int 
-          ? json['spot_number'] 
-          : int.tryParse(json['spot_number']?.toString() ?? ''),
+        vineyardName: vineyardName,
+        fieldName: fieldName,
+        rowNumber: rowNumber,
+        spotNumber: spotNumber,
         isDead: json['is_dead'] is bool 
           ? json['is_dead'] 
           : (json['is_dead']?.toString()?.toLowerCase() == 'true' || 
@@ -74,7 +90,7 @@ class VineApiModel {
       // Create a minimal valid object as fallback
       return VineApiModel(
         id: null,
-        alphaNumericID: json['alpha_numeric_id']?.toString() ?? 'error-id-${DateTime.now().millisecondsSinceEpoch}',
+        alphaNumericID: json['alpha_numeric_id']?.toString(),
         yearOfPlanting: null,
         nursery: null,
         variety: null,
