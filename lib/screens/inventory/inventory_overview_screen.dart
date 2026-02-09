@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../services/inventory_service.dart';
 import '../../services/repository.dart';
@@ -22,6 +23,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
   Map<String, int> _healthCounts = {};
   List<Map<String, dynamic>> _untaggedVines = [];
   String? _errorMessage;
+  StreamSubscription<String>? _dataUpdateSubscription;
 
   @override
   void initState() {
@@ -32,12 +34,47 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
     
     // Set up a listener for when tab changes
     _tabController.addListener(_handleTabIndexChanged);
+    
+    // Listen for background data updates
+    _dataUpdateSubscription = _inventoryService.dataUpdates.listen((context) {
+      print('Received data update notification for: $context');
+      if (mounted) {
+        _refreshDataAfterBackgroundSync();
+      }
+    });
   }
   
   void _handleTabIndexChanged() {
     // Reload data when tab changes to ensure fresh data
     if (_tabController.indexIsChanging) {
       _loadInventoryData();
+    }
+  }
+  
+  // Refresh data after background sync completes (without loading indicator)
+  Future<void> _refreshDataAfterBackgroundSync() async {
+    try {
+      // Load all summary data in parallel - no background refresh to avoid loops
+      final results = await Future.wait([
+        _inventoryService.getTotalVineCount(backgroundRefresh: false),
+        _inventoryService.getVarietySummary(backgroundRefresh: false),
+        _inventoryService.getVineyardSummary(backgroundRefresh: false),
+        _inventoryService.getHealthSummary(backgroundRefresh: false),
+        _loadUntaggedVines(backgroundRefresh: false),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _totalVines = results[0] as int;
+          _varietyCounts = results[1] as Map<String, int>;
+          _vineyardCounts = results[2] as Map<String, int>;
+          _healthCounts = results[3] as Map<String, int>;
+          _untaggedVines = results[4] as List<Map<String, dynamic>>;
+        });
+        print('UI refreshed after background sync with ${_totalVines} vines');
+      }
+    } catch (e) {
+      print('Error refreshing UI after background sync: $e');
     }
   }
 
@@ -52,6 +89,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
   void dispose() {
     _tabController.removeListener(_handleTabIndexChanged);
     _tabController.dispose();
+    _dataUpdateSubscription?.cancel();
     super.dispose();
   }
 
@@ -97,10 +135,17 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
     }
   }
 
-  Future<List<Map<String, dynamic>>> _loadUntaggedVines() async {
+  Future<List<Map<String, dynamic>>> _loadUntaggedVines({bool backgroundRefresh = true}) async {
     try {
-      // Get all vines from the repository
-      final allVines = await _repository.getAllVines();
+      // Get vines from local database immediately (fast)
+      final allVines = await _repository.getLocalVines();
+      
+      // Start background refresh if requested and online
+      if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+        _repository.startBackgroundVineSync().catchError((error) {
+          print('Background refresh error in _loadUntaggedVines: $error');
+        });
+      }
       print('DEBUG: Total vines loaded: ${allVines.length}');
       
       // Debug: Check some vine IDs to see the pattern
@@ -164,7 +209,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
                 );
                 
                 try {
-                  await _repository.syncLocalVinesToAPI();
+                  await _repository.syncWithDeltaMethod();
                   await _loadInventoryData();
                   
                   if (mounted) {

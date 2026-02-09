@@ -55,16 +55,7 @@ Future<void> _testApiEndpoints() async {
       print('DEBUG: Health endpoint not available: $e');
     }
     
-    // Test OpenAPI documentation
-    try {
-      final docsResponse = await http.get(
-        Uri.parse('${ApiConfig.baseUrl}/docs'),
-        headers: {'Content-Type': 'application/json'}
-      ).timeout(const Duration(seconds: 5));
-      print('DEBUG: API docs status: ${docsResponse.statusCode}');
-    } catch (e) {
-      print('DEBUG: API docs not available: $e');
-    }
+    // Skip docs endpoint test - not needed for connectivity check
     
     // Test vines endpoint (requires auth)
     try {

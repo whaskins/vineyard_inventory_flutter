@@ -1,5 +1,6 @@
 import '../../models/api/vine_api.dart';
 import '../../models/vine.dart';
+import '../../models/sync_models.dart';
 import 'api_service.dart';
 
 class VineApiService {
@@ -56,11 +57,11 @@ class VineApiService {
             vinesJson = [];
           }
           
-          // Convert JSON to Vine models
+          // Convert JSON to Vine models using the new API format
           final pageVines = vinesJson
               .map((json) {
                 try {
-                  return VineApiModel.fromJson(json).toLocalModel();
+                  return Vine.fromApiJson(json);
                 } catch (e) {
                   print('DEBUG: Error parsing vine: $e for json: $json');
                   return null;
@@ -128,7 +129,7 @@ class VineApiService {
       }
       
       try {
-        return VineApiModel.fromJson(jsonData).toLocalModel();
+        return Vine.fromApiJson(jsonData);
       } catch (e) {
         print('DEBUG: Error parsing vine: $e for json: $jsonData');
         return null;
@@ -173,7 +174,7 @@ class VineApiService {
       }
       
       try {
-        return VineApiModel.fromJson(jsonData).toLocalModel();
+        return Vine.fromApiJson(jsonData);
       } catch (e) {
         print('DEBUG: Error parsing vine: $e for json: $jsonData');
         return null;
@@ -204,9 +205,9 @@ class VineApiService {
           // Process the response
           if (updateResponse is Map<String, dynamic>) {
             if (updateResponse.containsKey('data') && updateResponse['data'] is Map<String, dynamic>) {
-              return VineApiModel.fromJson(updateResponse['data']).toLocalModel();
+              return Vine.fromApiJson(updateResponse['data']);
             } else {
-              return VineApiModel.fromJson(updateResponse).toLocalModel();
+              return Vine.fromApiJson(updateResponse);
             }
           }
           
@@ -241,7 +242,7 @@ class VineApiService {
           }
           
           try {
-            return VineApiModel.fromJson(jsonData).toLocalModel();
+            return Vine.fromApiJson(jsonData);
           } catch (e) {
             print('DEBUG: Error parsing vine: $e for json: $jsonData');
             return vine;
@@ -375,7 +376,7 @@ class VineApiService {
             
             try {
               if (jsonData != null) {
-                return VineApiModel.fromJson(jsonData).toLocalModel();
+                return Vine.fromApiJson(jsonData);
               } else {
                 print('DEBUG: jsonData is null, returning original vine');
                 return vine;
@@ -405,7 +406,7 @@ class VineApiService {
                 if (response is Map<String, dynamic>) {
                   try {
                     Map<String, dynamic> responseData = response;
-                    return VineApiModel.fromJson(responseData).toLocalModel();
+                    return Vine.fromApiJson(responseData);
                   } catch (e) {
                     print('DEBUG: Error parsing updated vine: $e');
                     return vine;
@@ -426,7 +427,7 @@ class VineApiService {
                 if (response is Map<String, dynamic>) {
                   try {
                     Map<String, dynamic> responseData = response;
-                    return VineApiModel.fromJson(responseData).toLocalModel();
+                    return Vine.fromApiJson(responseData);
                   } catch (e) {
                     print('DEBUG: Error parsing updated vine: $e');
                     return vine;
@@ -460,7 +461,7 @@ class VineApiService {
             
             if (createData != null) {
               try {
-                return VineApiModel.fromJson(createData).toLocalModel();
+                return Vine.fromApiJson(createData);
               } catch (e) {
                 print('DEBUG: Error parsing created vine: $e');
               }
@@ -479,7 +480,7 @@ class VineApiService {
               if (updateResponse is Map<String, dynamic>) {
                 try {
                   Map<String, dynamic> responseData = updateResponse;
-                  return VineApiModel.fromJson(responseData).toLocalModel();
+                  return Vine.fromApiJson(responseData);
                 } catch (e) {
                   print('DEBUG: Error parsing updated vine: $e');
                 }
@@ -542,6 +543,99 @@ class VineApiService {
     } catch (e) {
       print('DEBUG: Error in syncVineLocation: $e');
       rethrow;
+    }
+  }
+  
+  // Check if a vine location already exists
+  Future<bool> checkVineLocationExists(String vineyardName, String fieldName, int rowNumber, int spotNumber, String? alphaNumericId) async {
+    try {
+      print('DEBUG: Checking vine location existence via API');
+      
+      // Use query parameters to check if location exists
+      final Map<String, String> queryParams = {
+        'vineyard_name': vineyardName,
+        'field_name': fieldName,
+        'row_number': rowNumber.toString(),
+        'spot_number': spotNumber.toString(),
+      };
+      
+      if (alphaNumericId != null) {
+        queryParams['alpha_numeric_id'] = alphaNumericId;
+      }
+      
+      final queryString = queryParams.entries
+          .map((e) => '${Uri.encodeComponent(e.key)}=${Uri.encodeComponent(e.value)}')
+          .join('&');
+      
+      final response = await _apiService.get('$_endpoint/locations/check?$queryString');
+      
+      if (response is Map<String, dynamic>) {
+        return response['exists'] == true;
+      }
+      
+      return false;
+    } catch (e) {
+      print('DEBUG: Error checking vine location existence: $e');
+      // If error occurs, assume it doesn't exist to allow creation
+      return false;
+    }
+  }
+
+  // New Sync Methods for Efficient Data Synchronization
+
+  /// Get delta sync - only items changed since a specific timestamp
+  Future<DeltaSyncResponse> getDeltaSync(DeltaSyncRequest request) async {
+    try {
+      final queryParams = request.toQueryParams();
+      final queryString = queryParams.entries
+          .map((e) => '${Uri.encodeComponent(e.key)}=${Uri.encodeComponent(e.value)}')
+          .join('&');
+      
+      print('DEBUG: Getting delta sync since ${request.since}');
+      final response = await _apiService.get('$_endpoint/sync/delta?$queryString');
+      
+      return DeltaSyncResponse.fromJson(response);
+    } catch (e) {
+      print('DEBUG: Error in getDeltaSync: $e');
+      rethrow;
+    }
+  }
+
+  /// Batch sync multiple vines and vine locations
+  Future<VineSyncResponse> batchSync(VineSyncRequest request) async {
+    try {
+      print('DEBUG: Batch syncing ${request.vines.length} vines and ${request.vineLocations.length} vine locations');
+      final response = await _apiService.post('$_endpoint/sync/batch', request.toJson());
+      
+      return VineSyncResponse.fromJson(response);
+    } catch (e) {
+      print('DEBUG: Error in batchSync: $e');
+      rethrow;
+    }
+  }
+
+  /// Get sync status from server
+  Future<SyncStatus> getSyncStatus() async {
+    try {
+      print('DEBUG: Getting sync status from server');
+      final response = await _apiService.get('$_endpoint/sync/status');
+      
+      return SyncStatus.fromJson(response);
+    } catch (e) {
+      print('DEBUG: Error in getSyncStatus: $e');
+      rethrow;
+    }
+  }
+
+  /// Check server connectivity and get current time
+  Future<DateTime> getServerTime() async {
+    try {
+      final syncStatus = await getSyncStatus();
+      return syncStatus.serverTime;
+    } catch (e) {
+      print('DEBUG: Error getting server time: $e');
+      // Fallback to local time if server is unreachable
+      return DateTime.now();
     }
   }
 }

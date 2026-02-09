@@ -24,20 +24,24 @@ class ApiService {
   
   // Auth token
   String? _token;
-  
+
+  // Organization ID from JWT token
+  int? _orgId;
+
   // Store credentials for auto-refresh
   String? _lastEmail;
   String? _lastPassword;
-  
+
   // Token refresh settings
   bool _autoRefreshEnabled = true; // Enable auto-refresh by default
   int _refreshThresholdMinutes = 60; // Refresh token if it expires in less than 60 minutes
   bool _isRefreshing = false; // Flag to prevent multiple simultaneous refresh attempts
-  
+
   // Storage keys
   static const String _tokenKey = 'auth_token';
   static const String _emailKey = 'auth_email';
   static const String _passwordKey = 'auth_password';
+  static const String _orgIdKey = 'auth_org_id';
   
   // Constructor with initialization
   ApiService._internal() {
@@ -76,6 +80,12 @@ class ApiService {
       // Load credentials anyway for future refreshes
       _lastEmail = prefs.getString(_emailKey);
       _lastPassword = prefs.getString(_passwordKey);
+
+      // Load org_id
+      if (prefs.containsKey(_orgIdKey)) {
+        _orgId = prefs.getInt(_orgIdKey);
+        print('DEBUG: Loaded org_id from storage: $_orgId');
+      }
     } catch (e) {
       print('DEBUG: Error loading auth data from storage: $e');
     }
@@ -122,25 +132,59 @@ class ApiService {
   Future<void> _saveTokenToStorage(String? token) async {
     return _saveAuthDataToStorage(token: token);
   }
+
+  // Extract org_id from JWT token payload
+  void _extractOrgIdFromToken(String token) {
+    try {
+      final Map<String, dynamic> payload = JwtDecoder.decode(token);
+      if (payload.containsKey('org_id')) {
+        _orgId = payload['org_id'] as int?;
+        print('DEBUG: Extracted org_id from token: $_orgId');
+        _saveOrgIdToStorage(_orgId);
+      }
+    } catch (e) {
+      print('DEBUG: Error extracting org_id from token: $e');
+    }
+  }
+
+  // Save org_id to persistent storage
+  Future<void> _saveOrgIdToStorage(int? orgId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (orgId != null) {
+        await prefs.setInt(_orgIdKey, orgId);
+      } else {
+        await prefs.remove(_orgIdKey);
+      }
+    } catch (e) {
+      print('DEBUG: Error saving org_id to storage: $e');
+    }
+  }
   
   // Getter for authenticated status
   bool get isAuthenticated => _token != null;
 
+  // Getter for current org ID
+  int? get currentOrgId => _orgId;
+
   // Auth token setter
   set token(String? value) {
     _token = value;
-    
-    // If token is null/empty, also clear credentials
+
+    // If token is null/empty, also clear credentials and org_id
     if (value == null || value.isEmpty) {
       _lastEmail = null;
       _lastPassword = null;
+      _orgId = null;
       _saveAuthDataToStorage(
         token: null,
         email: null,
         password: null,
       );
+      _saveOrgIdToStorage(null);
     } else {
       _saveTokenToStorage(value);
+      _extractOrgIdFromToken(value);
     }
   }
   
@@ -295,11 +339,14 @@ class ApiService {
           
           // Save token
           _token = data['access_token'];
-          
+
+          // Extract org_id from JWT token
+          _extractOrgIdFromToken(_token!);
+
           // Store credentials for auto-refresh
           _lastEmail = email;
           _lastPassword = password;
-          
+
           // Save everything to storage
           _saveAuthDataToStorage(
             token: _token,

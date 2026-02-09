@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:vibration/vibration.dart';
 import '../models/vine.dart';
+import '../models/vine_location.dart';
 import '../services/database_service.dart';
 import '../services/repository.dart';
 import '../services/qr_scanner_service.dart';
@@ -30,6 +31,12 @@ class _RowScanScreenState extends State<RowScanScreen> {
   final TextEditingController _rowNumberController = TextEditingController();
   final TextEditingController _startingPositionController = TextEditingController(text: "1");
   
+  // Focus nodes to control text field focus
+  final FocusNode _vineyardFocusNode = FocusNode();
+  final FocusNode _fieldFocusNode = FocusNode();
+  final FocusNode _rowFocusNode = FocusNode();
+  final FocusNode _positionFocusNode = FocusNode();
+  
   bool _isScanning = true;
   bool _hasProcessedResult = false;
   int _currentSpotNumber = 1;
@@ -50,6 +57,10 @@ class _RowScanScreenState extends State<RowScanScreen> {
     _fieldNameController.dispose();
     _rowNumberController.dispose();
     _startingPositionController.dispose();
+    _vineyardFocusNode.dispose();
+    _fieldFocusNode.dispose();
+    _rowFocusNode.dispose();
+    _positionFocusNode.dispose();
     super.dispose();
   }
 
@@ -117,87 +128,146 @@ class _RowScanScreenState extends State<RowScanScreen> {
       return;
     }
 
-    try {
-      // Check if this vine ID already exists - use repository to check both local and API
-      debugPrint('Checking if vine ID already exists: $vineId');
-      final existingVine = await _repository.getVineByAlphaNumericID(vineId);
-      
-      if (existingVine != null) {
-        debugPrint('Updating existing vine with ID: $vineId');
-        // Update the existing vine with new position
-        final updatedVine = Vine(
-          id: existingVine.id,
-          alphaNumericID: vineId,
-          yearOfPlanting: existingVine.yearOfPlanting,
-          nursery: existingVine.nursery,
-          variety: existingVine.variety,
-          rootstock: existingVine.rootstock,
-          vineyardName: _vineyardNameController.text,
-          fieldName: _fieldNameController.text,
-          rowNumber: int.parse(_rowNumberController.text),
-          spotNumber: _currentSpotNumber,
-          isDead: existingVine.isDead,
-          dateDied: existingVine.dateDied,
-          recordCreated: existingVine.recordCreated,
-        );
-        
-        // Update using repository (will update both local DB and API if online)
-        final updatedResult = await _repository.updateVine(updatedVine);
-        debugPrint('Update result: ${updatedResult.id}');
-      } else {
-        debugPrint('Creating new vine with ID: $vineId');
-        // Create a new vine with the current position
-        final newVine = Vine(
-          alphaNumericID: vineId,
-          vineyardName: _vineyardNameController.text,
-          fieldName: _fieldNameController.text,
-          rowNumber: int.parse(_rowNumberController.text),
-          spotNumber: _currentSpotNumber,
-          isDead: false,
-        );
-        
-        // Insert using repository (will insert both locally and to API if online)
-        final insertedVine = await _repository.insertVine(newVine);
-        debugPrint('Insert result: ${insertedVine.id}');
+    // Store previous position for messaging
+    final int savedPosition = _currentSpotNumber;
+    final int nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
+    
+    // Immediately update UI to show success and move to next position
+    setState(() {
+      _lastScannedVineId = vineId;
+      _successMessage = 'Vine $vineId queued for saving at position $savedPosition.\nReady for position $nextPosition';
+      _currentSpotNumber = nextPosition;
+      _showSettings = false;
+    });
+    
+    // Resume scanning immediately to keep UI responsive
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) {
+        _resumeScanner();
       }
-      
-      // Update state
-      // Store previous position for messaging
-      final int savedPosition = _currentSpotNumber;
-      final int nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
-      
-      // Check if we're online to update the success message
-      final String syncStatus = _repository.isOnline 
-          ? 'Saved locally and synced to cloud.' 
-          : 'Saved locally. Will sync when online.';
-      
-      setState(() {
-        _lastScannedVineId = vineId;
-        _successMessage = 'Vine $vineId saved at position $savedPosition. $syncStatus\nReady for position $nextPosition';
-        _currentSpotNumber = nextPosition;  // Move to next position based on direction
-        _showSettings = false;
-      });
-      
-      // Resume scanning after a short delay
-      Future.delayed(const Duration(seconds: 1), () {
-        if (mounted) {
-          _resumeScanner();
-        }
-      });
-    } catch (e, stackTrace) {
-      debugPrint('Error saving vine: $e');
-      debugPrint('Stack trace: $stackTrace');
-      setState(() {
-        _errorMessage = 'Error saving vine: $e';
-      });
-      _resumeScanner();
-    }
+    });
+    
+    // Process the save operation in the background
+    _processSaveInBackground(vineId, savedPosition);
   }
+  
+  void _processSaveInBackground(String vineId, int position) {
+    // Run the save operation in the background without blocking the UI
+    Future.microtask(() async {
+      try {
+        debugPrint('Background: Processing save for vine $vineId at position $position');
+        
+        // Check if this vine ID already exists - use repository to check both local and API
+        debugPrint('Background: Checking if vine ID already exists: $vineId');
+        final existingVine = await _repository.getVineByAlphaNumericID(vineId);
+        
+        if (existingVine != null) {
+          debugPrint('Background: Updating existing vine with ID: $vineId');
+          // Create updated location
+          final updatedLocation = VineLocation(
+            id: existingVine.location?.id,
+            alphaNumericId: vineId,
+            vineyardName: _vineyardNameController.text,
+            fieldName: _fieldNameController.text,
+            rowNumber: int.parse(_rowNumberController.text),
+            spotNumber: position,
+            recordCreated: existingVine.location?.recordCreated,
+            updatedAt: existingVine.location?.updatedAt,
+          );
+          
+          // Update the existing vine with new position
+          final updatedVine = Vine(
+            id: existingVine.id,
+            alphaNumericID: vineId,
+            yearOfPlanting: existingVine.yearOfPlanting,
+            nursery: existingVine.nursery,
+            variety: existingVine.variety,
+            rootstock: existingVine.rootstock,
+            isDead: existingVine.isDead,
+            dateDied: existingVine.dateDied,
+            recordCreated: existingVine.recordCreated,
+            location: updatedLocation,
+          );
+          
+          // Update using repository (will update both local DB and API if online)
+          final updatedResult = await _repository.updateVine(updatedVine);
+          debugPrint('Background: Update result: ${updatedResult.id}');
+        } else {
+          debugPrint('Background: Creating new vine with ID: $vineId');
+          // Create location for new vine
+          final newLocation = VineLocation(
+            alphaNumericId: vineId,
+            vineyardName: _vineyardNameController.text,
+            fieldName: _fieldNameController.text,
+            rowNumber: int.parse(_rowNumberController.text),
+            spotNumber: position,
+          );
+          
+          // Create a new vine with the current position
+          final newVine = Vine(
+            alphaNumericID: vineId,
+            isDead: false,
+            location: newLocation,
+          );
+          
+          // Insert using repository (will insert both locally and to API if online)
+          final insertedVine = await _repository.insertVine(newVine);
+          debugPrint('Background: Insert result: ${insertedVine.id}');
+        }
+        
+        // Also create a vine_locations entry to track this vine's position if it doesn't already exist
+        try {
+          final bool locationExists = await _repository.vineLocationExists(
+            _vineyardNameController.text,
+            _fieldNameController.text, 
+            int.parse(_rowNumberController.text),
+            position,
+            vineId
+          );
+          
+          if (!locationExists) {
+            final locationData = {
+              'vineyard_name': _vineyardNameController.text,
+              'field_name': _fieldNameController.text,
+              'row_number': int.parse(_rowNumberController.text),
+              'spot_number': position,
+              'year_of_planting': null, // Will be populated from vine data
+              'alpha_numeric_id': vineId,
+            };
+            
+            debugPrint('Background: Creating vine location entry for scanned tag: $locationData');
+            await _repository.insertVineLocation(locationData);
+          } else {
+            debugPrint('Background: Vine location already exists for $vineId at this position, skipping');
+          }
+        } catch (e) {
+          debugPrint('Background: Warning - Could not create vine location entry: $e');
+          // Don't fail the whole operation if location entry fails
+        }
+        
+        debugPrint('Background: Successfully saved vine $vineId at position $position');
+        
+      } catch (e, stackTrace) {
+        debugPrint('Background: Error saving vine $vineId: $e');
+        debugPrint('Background: Stack trace: $stackTrace');
+        // Error is logged but user continues working - data saved locally
+      }
+    });
+  }
+  
 
-  void _skipPosition() {
+  Future<void> _skipPosition() async {
     // Store current position for messaging
     final int skippedPosition = _currentSpotNumber;
     final int nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
+    
+    // Validate that row settings are entered
+    if (_vineyardNameController.text.isEmpty || _fieldNameController.text.isEmpty || _rowNumberController.text.isEmpty) {
+      setState(() {
+        _errorMessage = 'Please enter vineyard name, field name, and row number first';
+      });
+      return;
+    }
     
     // Vibrate with a different pattern for skip (shorter)
     Vibration.vibrate(duration: 50);
@@ -205,6 +275,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
     setState(() {
       _successMessage = 'Marked position $skippedPosition as empty. Ready for position $nextPosition';
       _currentSpotNumber = nextPosition;
+      _errorMessage = null;
       
       // Briefly pause the scanner to show the message
       _pauseScanner();
@@ -216,7 +287,51 @@ class _RowScanScreenState extends State<RowScanScreen> {
         _resumeScanner();
       }
     });
+    
+    // Process the skip operation in the background
+    _processSkipInBackground(skippedPosition);
   }
+  
+  void _processSkipInBackground(int position) {
+    // Run the skip operation in the background without blocking the UI
+    Future.microtask(() async {
+      try {
+        debugPrint('Background: Processing skip for position $position');
+        
+        // Create a vine_locations entry for the empty position if it doesn't already exist
+        final bool locationExists = await _repository.vineLocationExists(
+          _vineyardNameController.text,
+          _fieldNameController.text,
+          int.parse(_rowNumberController.text),
+          position,
+          null // No vine at this position
+        );
+        
+        if (!locationExists) {
+          final locationData = {
+            'vineyard_name': _vineyardNameController.text,
+            'field_name': _fieldNameController.text,
+            'row_number': int.parse(_rowNumberController.text),
+            'spot_number': position,
+            'year_of_planting': null,
+            'alpha_numeric_id': null, // No vine at this position
+          };
+          
+          debugPrint('Background: Creating vine location entry for empty position: $locationData');
+          await _repository.insertVineLocation(locationData);
+        } else {
+          debugPrint('Background: Location entry already exists for this empty position, skipping');
+        }
+        
+        debugPrint('Background: Successfully processed skip for position $position');
+        
+      } catch (e) {
+        debugPrint('Background: Warning - Could not create vine location entry for empty position: $e');
+        // Error is logged but user continues working - will sync when online
+      }
+    });
+  }
+  
 
   void _toggleSettings() {
     setState(() {
@@ -242,8 +357,8 @@ class _RowScanScreenState extends State<RowScanScreen> {
     });
     
     try {
-      // Use repository to sync vines
-      final syncCount = await _repository.syncLocalVinesToAPI();
+      // Use repository to sync pending changes
+      final syncCount = await _repository.syncPendingChangesToAPI();
       
       setState(() {
         if (syncCount > 0) {
@@ -263,8 +378,6 @@ class _RowScanScreenState extends State<RowScanScreen> {
 
   // Show dialog to select vine age for untagged vines
   Future<void> _showAgeSelectionDialog() async {
-    final currentYear = DateTime.now().year;
-    
     if (_vineyardNameController.text.isEmpty || 
         _fieldNameController.text.isEmpty || 
         _rowNumberController.text.isEmpty) {
@@ -273,102 +386,161 @@ class _RowScanScreenState extends State<RowScanScreen> {
       });
       return;
     }
+    
+    // Completely dismiss all focus and keyboard
+    for (var node in [_vineyardFocusNode, _fieldFocusNode, _rowFocusNode, _positionFocusNode]) {
+      if (node.hasFocus) {
+        node.unfocus();
+      }
+    }
+    
+    // Clear primary focus completely
+    FocusManager.instance.primaryFocus?.unfocus();
+    
+    // Wait longer for keyboard to fully dismiss
+    await Future.delayed(const Duration(milliseconds: 300));
+    
+    // Check if widget is still mounted after delay
+    if (!mounted) return;
 
     final int? selectedAge = await showDialog<int>(
       context: context,
+      barrierDismissible: true,
       builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Vine Age'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('A vine exists at position $_currentSpotNumber but has no tag.'),
-              const SizedBox(height: 16),
-              const Text('How old is this vine?'),
+        return PopScope(
+          onPopInvoked: (didPop) {
+            // Ensure keyboard stays dismissed when dialog closes
+            FocusScope.of(context).unfocus();
+          },
+          child: AlertDialog(
+            title: const Text('Vine Age'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('A vine exists at position $_currentSpotNumber but has no tag.'),
+                const SizedBox(height: 16),
+                const Text('How old is this vine?'),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  Navigator.of(context).pop();
+                },
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  Navigator.of(context).pop(1);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('1 Year Old'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  FocusScope.of(context).unfocus();
+                  Navigator.of(context).pop(2);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('2 Years Old'),
+              ),
             ],
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(1),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('1 Year Old'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(2),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('2 Years Old'),
-            ),
-          ],
         );
       },
     );
 
     if (selectedAge != null) {
+      // Ensure keyboard stays dismissed after dialog closes
+      if (mounted) {
+        FocusManager.instance.primaryFocus?.unfocus();
+        for (var node in [_vineyardFocusNode, _fieldFocusNode, _rowFocusNode, _positionFocusNode]) {
+          if (node.hasFocus) {
+            node.unfocus();
+          }
+        }
+      }
       await _createUntaggedVine(selectedAge);
+    } else {
+      // Even if cancelled, make sure keyboard stays dismissed
+      if (mounted) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      }
     }
   }
 
   // Create a vine location record without a QR tag
   Future<void> _createUntaggedVine(int ageInYears) async {
-    try {
-      final currentYear = DateTime.now().year;
-      final plantingYear = currentYear - ageInYears;
-      
-      // For untagged vines, create a vine location record (not a vine record)
-      final locationData = {
-        'vineyard_name': _vineyardNameController.text,
-        'field_name': _fieldNameController.text,
-        'row_number': int.parse(_rowNumberController.text),
-        'spot_number': _currentSpotNumber,
-        'year_of_planting': plantingYear,
-        'alpha_numeric_id': null, // No tag for this location
-      };
-      
-      print('DEBUG: Creating untagged vine location: ${locationData}');
-
-      // Save directly to backend via API (since this is vine location, not vine)
-      print('DEBUG: Repository online status: ${_repository.isOnline}');
-      await _repository.insertVineLocation(locationData);
-      print('DEBUG: Vine location insertion completed');
-      
-      // Provide vibration feedback
-      await _triggerVibration();
-      
-      // Move to next position
-      final nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
-      
-      setState(() {
-        _successMessage = 'Created untagged vine (${ageInYears}y old) at position $_currentSpotNumber. Ready for position $nextPosition';
-        _currentSpotNumber = nextPosition;
-        _errorMessage = null;
-      });
-      
-      // Brief pause before continuing
-      _pauseScanner();
-      Future.delayed(const Duration(milliseconds: 1000), () {
-        if (mounted) {
-          _resumeScanner();
-        }
-      });
-      
-    } catch (e) {
-      setState(() {
-        _errorMessage = "Error creating vine: $e";
-        _successMessage = null;
-      });
-    }
+    final savedPosition = _currentSpotNumber;
+    
+    // Provide vibration feedback
+    await _triggerVibration();
+    
+    // Move to next position immediately
+    final nextPosition = _isForwardDirection ? _currentSpotNumber + 1 : _currentSpotNumber - 1;
+    
+    setState(() {
+      _successMessage = 'Untagged vine (${ageInYears}y old) queued for position $savedPosition. Ready for position $nextPosition';
+      _currentSpotNumber = nextPosition;
+      _errorMessage = null;
+    });
+    
+    // Brief pause before continuing
+    _pauseScanner();
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) {
+        _resumeScanner();
+      }
+    });
+    
+    // Process the untagged vine creation in the background
+    _processUntaggedVineInBackground(savedPosition, ageInYears);
   }
+  
+  void _processUntaggedVineInBackground(int position, int ageInYears) {
+    // Run the creation operation in the background without blocking the UI
+    Future.microtask(() async {
+      try {
+        debugPrint('Background: Creating untagged vine at position $position');
+        
+        final currentYear = DateTime.now().year;
+        final plantingYear = currentYear - ageInYears;
+        
+        // For untagged vines, create a vine location record (not a vine record)
+        final locationData = {
+          'vineyard_name': _vineyardNameController.text,
+          'field_name': _fieldNameController.text,
+          'row_number': int.parse(_rowNumberController.text),
+          'spot_number': position,
+          'year_of_planting': plantingYear,
+          'alpha_numeric_id': null, // No tag for this location
+        };
+        
+        debugPrint('Background: Creating untagged vine location: $locationData');
+        
+        // Save directly to backend via API (since this is vine location, not vine)
+        debugPrint('Background: Repository online status: ${_repository.isOnline}');
+        await _repository.insertVineLocation(locationData);
+        debugPrint('Background: Vine location insertion completed');
+        
+        debugPrint('Background: Successfully created untagged vine at position $position');
+        
+      } catch (e) {
+        debugPrint('Background: Error creating untagged vine: $e');
+        // Error is logged but user continues working - will sync when online
+      }
+    });
+  }
+  
 
   @override
   Widget build(BuildContext context) {
@@ -397,7 +569,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    _repository.isOnline ? 'Online' : 'Offline',
+                    _repository.isOnline ? 'Backend Connected' : 'Backend Offline',
                     style: TextStyle(
                       fontSize: 12,
                       color: _repository.isOnline
@@ -427,6 +599,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
           // Dismiss keyboard when tapping outside of text fields
           FocusScope.of(context).unfocus();
         },
+        behavior: HitTestBehavior.opaque,
         child: SingleChildScrollView(
           child: ConstrainedBox(
             constraints: BoxConstraints(
@@ -477,6 +650,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
                     const SizedBox(height: 8),
                     TextField(
                       controller: _vineyardNameController,
+                      focusNode: _vineyardFocusNode,
                       decoration: const InputDecoration(
                         labelText: 'Vineyard Name',
                         border: OutlineInputBorder(),
@@ -486,6 +660,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
                     const SizedBox(height: 8),
                     TextField(
                       controller: _fieldNameController,
+                      focusNode: _fieldFocusNode,
                       decoration: const InputDecoration(
                         labelText: 'Field Name',
                         border: OutlineInputBorder(),
@@ -498,6 +673,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
                         Expanded(
                           child: TextField(
                             controller: _rowNumberController,
+                            focusNode: _rowFocusNode,
                             decoration: const InputDecoration(
                               labelText: 'Row Number',
                               border: OutlineInputBorder(),
@@ -515,6 +691,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
                         Expanded(
                           child: TextField(
                             controller: _startingPositionController,
+                            focusNode: _positionFocusNode,
                             decoration: const InputDecoration(
                               labelText: 'Starting Position',
                               border: OutlineInputBorder(),
@@ -591,7 +768,7 @@ class _RowScanScreenState extends State<RowScanScreen> {
           ),
           
           // Scanner section
-          Container(
+          SizedBox(
             height: 400, // Fixed height for scanner
             child: Stack(
               alignment: Alignment.center,
@@ -721,10 +898,10 @@ class _RowScanScreenState extends State<RowScanScreen> {
                         ),
                         // Sync status indicator
                         Tooltip(
-                          message: _repository.isOnline ? 'Synced to cloud' : 'Not synced to cloud yet',
+                          message: _repository.isOnline ? 'Backend connected - data syncing' : 'Backend offline - data saved locally',
                           child: Icon(
-                            _repository.isOnline ? Icons.cloud_done : Icons.cloud_upload,
-                            color: _repository.isOnline ? Colors.green[700] : Colors.amber[700],
+                            _repository.isOnline ? Icons.cloud_done : Icons.cloud_off,
+                            color: _repository.isOnline ? Colors.green[700] : Colors.orange[700],
                             size: 20,
                           ),
                         ),

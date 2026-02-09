@@ -8,6 +8,8 @@ import 'vine_detail_screen.dart';
 import 'row_scan_screen.dart';
 import 'login_screen.dart';
 import 'inventory/inventory_overview_screen.dart';
+import 'map_screen.dart';
+import 'member_management_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -22,8 +24,10 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   bool _isOnline = false;
   bool _isLoggedIn = false;
+  bool _isAdmin = false;
   List<Vine> _recentVines = [];
   String? _errorMessage;
+  String? _orgName;
 
   @override
   void initState() {
@@ -31,6 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
     debugPrint('Home screen initialized');
     _checkConnectionStatus();
     _loadRecentVines();
+    _loadOrganizationName();
   }
 
   void _checkConnectionStatus() {
@@ -38,6 +43,22 @@ class _HomeScreenState extends State<HomeScreen> {
       _isOnline = _repository.isOnline;
       _isLoggedIn = _authService.isAuthenticated();
     });
+  }
+
+  Future<void> _loadOrganizationName() async {
+    if (!_authService.isAuthenticated() || !_repository.isOnline) return;
+    try {
+      final org = await _authService.getMyOrganization();
+      final user = await _authService.getCurrentUser();
+      if (mounted) {
+        setState(() {
+          _orgName = org.name;
+          _isAdmin = user.isAdmin;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading organization name: $e');
+    }
   }
   
   // Refresh only local vines (used after background sync completes)
@@ -72,7 +93,7 @@ class _HomeScreenState extends State<HomeScreen> {
         debugPrint('Forcing refresh from server');
         try {
           // First sync any local changes to API
-          final syncCount = await _repository.syncLocalVinesToAPI();
+          final syncCount = await _repository.syncWithDeltaMethod();
           debugPrint('Synced $syncCount vines to server');
           
           // Show a brief message that data is refreshing
@@ -163,6 +184,24 @@ class _HomeScreenState extends State<HomeScreen> {
       _loadRecentVines();
     });
   }
+
+  void _navigateToMapView() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => const MapScreen(),
+      ),
+    ).then((_) {
+      _loadRecentVines();
+    });
+  }
+
+  void _navigateToMemberManagement() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => const MemberManagementScreen(),
+      ),
+    );
+  }
   
 
   void _navigateToVineDetail(String vineId) {
@@ -215,6 +254,7 @@ class _HomeScreenState extends State<HomeScreen> {
       // Refresh status and vines when returning from login screen
       _checkConnectionStatus();
       _loadRecentVines();
+      _loadOrganizationName();
     });
   }
 
@@ -222,7 +262,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Vineyard Inventory'),
+        title: Text(_orgName ?? 'Vineyard Inventory'),
         centerTitle: true,
         backgroundColor: Theme.of(context).primaryColor,
         foregroundColor: Colors.white,
@@ -240,7 +280,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 
                 try {
                   // First sync local data to API
-                  final syncCount = await _repository.syncLocalVinesToAPI();
+                  final syncCount = await _repository.syncWithDeltaMethod();
                   
                   // Then reload to get the latest data
                   await _loadRecentVines();
@@ -513,6 +553,27 @@ class _HomeScreenState extends State<HomeScreen> {
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_isLoggedIn && _isAdmin)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: FloatingActionButton.extended(
+                onPressed: _navigateToMemberManagement,
+                icon: const Icon(Icons.people),
+                label: const Text('Manage Members'),
+                backgroundColor: Colors.deepPurple,
+                foregroundColor: Colors.white,
+                heroTag: 'members',
+              ),
+            ),
+          FloatingActionButton.extended(
+            onPressed: _navigateToMapView,
+            icon: const Icon(Icons.map),
+            label: const Text('Map View'),
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+            heroTag: 'mapView',
+          ),
+          const SizedBox(height: 16),
           FloatingActionButton.extended(
             onPressed: _navigateToInventoryOverview,
             icon: const Icon(Icons.dashboard),

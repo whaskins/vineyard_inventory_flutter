@@ -1,4 +1,5 @@
 import '../vine.dart';
+import '../vine_location.dart';
 
 class VineApiModel {
   final int? id;
@@ -15,6 +16,9 @@ class VineApiModel {
   final String? dateDied;
   final String createdAt;
   final String updatedAt;
+  final double? latitude;
+  final double? longitude;
+  final double? gpsAccuracy;
 
   VineApiModel({
     this.id,
@@ -31,6 +35,9 @@ class VineApiModel {
     this.dateDied,
     required this.createdAt,
     required this.updatedAt,
+    this.latitude,
+    this.longitude,
+    this.gpsAccuracy,
   });
 
   // Convert API response to VineApiModel with robust error handling
@@ -38,16 +45,18 @@ class VineApiModel {
     try {
       print('DEBUG: Parsing VineApiModel from JSON: $json');
       
-      // Extract location data from locations array (new schema)
+      // Extract location data from location object (new 1:1 schema)
       String? vineyardName;
       String? fieldName;
       int? rowNumber;
       int? spotNumber;
-      
-      final List<dynamic>? locations = json['locations'];
-      if (locations != null && locations.isNotEmpty) {
-        // Use the first location if available
-        final location = locations.first as Map<String, dynamic>;
+      double? latitude;
+      double? longitude;
+      double? gpsAccuracy;
+
+      // First try the new singular 'location' field
+      final Map<String, dynamic>? location = json['location'];
+      if (location != null) {
         vineyardName = location['vineyard_name']?.toString();
         fieldName = location['field_name']?.toString();
         rowNumber = location['row_number'] is int 
@@ -56,6 +65,30 @@ class VineApiModel {
         spotNumber = location['spot_number'] is int 
           ? location['spot_number'] 
           : int.tryParse(location['spot_number']?.toString() ?? '');
+        
+        latitude = location['latitude'] != null ? (location['latitude'] as num).toDouble() : null;
+        longitude = location['longitude'] != null ? (location['longitude'] as num).toDouble() : null;
+        gpsAccuracy = location['gps_accuracy'] != null ? (location['gps_accuracy'] as num).toDouble() : null;
+
+        print('DEBUG: Extracted vineyard_name: "$vineyardName" from singular location: $location');
+      } else {
+        // Fallback to old 'locations' array for backward compatibility
+        final List<dynamic>? locations = json['locations'];
+        if (locations != null && locations.isNotEmpty) {
+          final locationData = locations.first as Map<String, dynamic>;
+          vineyardName = locationData['vineyard_name']?.toString();
+          fieldName = locationData['field_name']?.toString();
+          rowNumber = locationData['row_number'] is int 
+            ? locationData['row_number'] 
+            : int.tryParse(locationData['row_number']?.toString() ?? '');
+          spotNumber = locationData['spot_number'] is int 
+            ? locationData['spot_number'] 
+            : int.tryParse(locationData['spot_number']?.toString() ?? '');
+          
+          print('DEBUG: Extracted vineyard_name: "$vineyardName" from locations array: $locationData');
+        } else {
+          print('DEBUG: No location data found in vine JSON: ${json.keys.join(', ')}');
+        }
       }
       
       // Ensure all required fields exist, with defaults as needed
@@ -78,12 +111,16 @@ class VineApiModel {
           : (json['is_dead']?.toString()?.toLowerCase() == 'true' || 
              json['is_dead'] == 1) ?? false,
         dateDied: json['date_died']?.toString(),
-        createdAt: json['created_at']?.toString() ?? 
-                  json['created_date']?.toString() ?? 
+        createdAt: json['record_created']?.toString() ??
+                  json['created_at']?.toString() ??
+                  json['created_date']?.toString() ??
                   DateTime.now().toIso8601String(),
-        updatedAt: json['updated_at']?.toString() ?? 
-                  json['updated_date']?.toString() ?? 
+        updatedAt: json['updated_at']?.toString() ??
+                  json['updated_date']?.toString() ??
                   DateTime.now().toIso8601String(),
+        latitude: latitude,
+        longitude: longitude,
+        gpsAccuracy: gpsAccuracy,
       );
     } catch (e) {
       print('DEBUG: Error parsing VineApiModel: $e for JSON: $json');
@@ -127,6 +164,23 @@ class VineApiModel {
 
   // Convert API model to local model
   Vine toLocalModel() {
+    // Create VineLocation from the API data
+    VineLocation? location;
+    if (vineyardName != null || fieldName != null || rowNumber != null || spotNumber != null) {
+      location = VineLocation(
+        alphaNumericId: alphaNumericID,
+        vineyardName: vineyardName ?? '',
+        fieldName: fieldName ?? '',
+        rowNumber: rowNumber ?? 0,
+        spotNumber: spotNumber ?? 0,
+        latitude: latitude,
+        longitude: longitude,
+        gpsAccuracy: gpsAccuracy,
+        recordCreated: DateTime.parse(createdAt),
+        updatedAt: DateTime.parse(updatedAt),
+      );
+    }
+    
     return Vine(
       id: id,
       alphaNumericID: alphaNumericID,
@@ -134,13 +188,11 @@ class VineApiModel {
       nursery: nursery,
       variety: variety,
       rootstock: rootstock,
-      vineyardName: vineyardName,
-      fieldName: fieldName,
-      rowNumber: rowNumber,
-      spotNumber: spotNumber,
       isDead: isDead,
       dateDied: dateDied != null ? DateTime.parse(dateDied!) : null,
       recordCreated: DateTime.parse(createdAt),
+      updatedAt: DateTime.parse(updatedAt),
+      location: location,
     );
   }
 
@@ -161,6 +213,9 @@ class VineApiModel {
       dateDied: vine.dateDied?.toIso8601String(),
       createdAt: vine.recordCreated.toIso8601String(),
       updatedAt: DateTime.now().toIso8601String(),
+      latitude: vine.location?.latitude,
+      longitude: vine.location?.longitude,
+      gpsAccuracy: vine.location?.gpsAccuracy,
     );
   }
 }

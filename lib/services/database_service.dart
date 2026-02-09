@@ -46,7 +46,7 @@ class DatabaseService {
       final db = await databaseFactory.openDatabase(
         path,
         options: OpenDatabaseOptions(
-          version: 3,
+          version: 5,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -61,7 +61,7 @@ class DatabaseService {
       try {
         final db = await openDatabase(
           path,
-          version: 3,
+          version: 5,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         );
@@ -139,11 +139,27 @@ class DatabaseService {
       
       debugPrint('Successfully migrated vines table to support nullable alphaNumericID');
     }
+    
+    if (oldVersion <= 3 && newVersion >= 4) {
+      // Add updatedAt column to vines table for version 4 (for delta sync support)
+      debugPrint('Adding updatedAt column to vines table for delta sync');
+      await db.execute('ALTER TABLE vines ADD COLUMN updatedAt TEXT');
+      debugPrint('Successfully added updatedAt column to vines table');
+    }
+
+    if (oldVersion <= 4 && newVersion >= 5) {
+      // Add GPS coordinate columns to vines table for version 5
+      debugPrint('Adding GPS coordinate columns to vines table');
+      await db.execute('ALTER TABLE vines ADD COLUMN latitude REAL');
+      await db.execute('ALTER TABLE vines ADD COLUMN longitude REAL');
+      await db.execute('ALTER TABLE vines ADD COLUMN gpsAccuracy REAL');
+      debugPrint('Successfully added GPS coordinate columns to vines table');
+    }
   }
   
   // Create database tables
   Future<void> _createDatabase(Database db, int version) async {
-    // Vines table (version 3+ with nullable alphaNumericID)
+    // Vines table (version 4+ with updatedAt column for delta sync)
     await db.execute('''
       CREATE TABLE vines (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,7 +174,11 @@ class DatabaseService {
         spotNumber INTEGER,
         isDead INTEGER NOT NULL DEFAULT 0,
         dateDied TEXT,
-        recordCreated TEXT NOT NULL
+        recordCreated TEXT NOT NULL,
+        updatedAt TEXT,
+        latitude REAL,
+        longitude REAL,
+        gpsAccuracy REAL
       )
     ''');
     
@@ -206,6 +226,18 @@ class DatabaseService {
         FOREIGN KEY (vineID) REFERENCES vines (id) ON DELETE CASCADE
       )
     ''');
+  }
+
+  // Clear all data from all tables (used when switching organizations)
+  Future<void> clearAllData() async {
+    Database db = await database;
+    await db.transaction((txn) async {
+      await txn.delete('vineIssues');
+      await txn.delete('maintenanceActivities');
+      await txn.delete('maintenanceTypes');
+      await txn.delete('vines');
+    });
+    debugPrint('All local data cleared');
   }
 
   // VINE OPERATIONS
@@ -327,13 +359,10 @@ class DatabaseService {
             nursery: vine.nursery,
             variety: vine.variety, 
             rootstock: vine.rootstock,
-            vineyardName: vine.vineyardName,
-            fieldName: vine.fieldName,
-            rowNumber: vine.rowNumber,
-            spotNumber: vine.spotNumber,
             isDead: vine.isDead,
             dateDied: vine.dateDied,
             recordCreated: vine.recordCreated,
+            location: vine.location,
           );
           
           final result = await db.update(
@@ -599,5 +628,40 @@ class DatabaseService {
     return List.generate(maps.length, (i) {
       return VineIssue.fromMap(maps[i]);
     });
+  }
+  
+  // Batch insert vines for better performance
+  Future<void> batchInsertVines(List<Vine> vines) async {
+    if (vines.isEmpty) return;
+    
+    Database db = await database;
+    Batch batch = db.batch();
+    
+    for (var vine in vines) {
+      batch.insert('vines', vine.toMap());
+    }
+    
+    await batch.commit(noResult: true);
+    print('DEBUG: Batch inserted ${vines.length} vines');
+  }
+  
+  // Batch update vines for better performance  
+  Future<void> batchUpdateVines(List<Vine> vines) async {
+    if (vines.isEmpty) return;
+    
+    Database db = await database;
+    Batch batch = db.batch();
+    
+    for (var vine in vines) {
+      batch.update(
+        'vines', 
+        vine.toMap(),
+        where: 'id = ?',
+        whereArgs: [vine.id],
+      );
+    }
+    
+    await batch.commit(noResult: true);
+    print('DEBUG: Batch updated ${vines.length} vines');
   }
 }

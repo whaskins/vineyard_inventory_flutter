@@ -1,3 +1,4 @@
+import 'dart:async';
 import '../models/vine.dart';
 import 'repository.dart';
 
@@ -9,12 +10,31 @@ class InventoryService {
   
   final Repository _repository = Repository();
   
+  // Stream controller for notifying UI about data updates
+  final StreamController<String> _dataUpdateController = StreamController<String>.broadcast();
+  Stream<String> get dataUpdates => _dataUpdateController.stream;
+  
+  // Dispose method to clean up resources
+  void dispose() {
+    _dataUpdateController.close();
+  }
+  
+  // Helper method to start background sync and notify when complete
+  void _startBackgroundSyncWithNotification(String context) {
+    _repository.startBackgroundVineSync().then((_) {
+      print('Background sync completed for $context');
+      _dataUpdateController.add(context);
+    }).catchError((error) {
+      print('Background refresh error in $context: $error');
+    });
+  }
+  
   // Force a full refresh of data from API
   Future<bool> refreshFromAPI() async {
     if (_repository.isOnline && _repository.isAuthenticated) {
       try {
         // First sync any local changes to API
-        await _repository.syncLocalVinesToAPI();
+        await _repository.syncWithDeltaMethod();
         
         // Then force a complete refresh from the API
         await _repository.forceRefreshFromAPI();
@@ -28,22 +48,53 @@ class InventoryService {
     return false;
   }
   
-  // Get all vineyards from the vines data - always gets fresh data
-  Future<List<String>> getVineyards() async {
-    // Force refresh from repository to get latest data
-    final vines = await _repository.getAllVines();
+  // DEBUG: Force refresh and reset sync timestamp to get all recent data
+  Future<bool> debugRefreshAllData() async {
+    if (_repository.isOnline && _repository.isAuthenticated) {
+      try {
+        print('DEBUG: Starting fresh data sync (bypassing timestamp)');
+        
+        // Reset sync timestamp to get data from the last 24 hours
+        await _repository.resetSyncTimestamp(const Duration(hours: 24));
+        
+        // Sync with the reset timestamp
+        final syncedCount = await _repository.syncWithDeltaMethod();
+        print('DEBUG: Synced $syncedCount items with reset timestamp');
+        
+        // Force a complete refresh as well
+        await _repository.forceRefreshFromAPI();
+        
+        return true;
+      } catch (e) {
+        print('DEBUG: Error in debugRefreshAllData: $e');
+        return false;
+      }
+    }
+    return false;
+  }
+  
+  // Get all vineyards from local data (fast) - with optional background refresh
+  Future<List<String>> getVineyards({bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     final vineyards = vines
         .where((v) => v.vineyardName != null && v.vineyardName!.isNotEmpty)
         .map((v) => v.vineyardName!)
         .toSet()
         .toList();
     
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('vineyards');
+    }
+    
     return vineyards..sort();
   }
   
-  // Get all fields for a specific vineyard
-  Future<List<String>> getFieldsForVineyard(String vineyardName) async {
-    final vines = await _repository.getAllVines();
+  // Get all fields for a specific vineyard from local data (fast)
+  Future<List<String>> getFieldsForVineyard(String vineyardName, {bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     final fields = vines
         .where((v) => v.vineyardName == vineyardName && 
                      v.fieldName != null && 
@@ -52,12 +103,18 @@ class InventoryService {
         .toSet()
         .toList();
     
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('fields');
+    }
+    
     return fields..sort();
   }
   
-  // Get all rows for a specific field in a vineyard
-  Future<List<String>> getRowsForField(String vineyardName, String fieldName) async {
-    final vines = await _repository.getAllVines();
+  // Get all rows for a specific field in a vineyard from local data (fast)
+  Future<List<String>> getRowsForField(String vineyardName, String fieldName, {bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     final rows = vines
         .where((v) => v.vineyardName == vineyardName && 
                      v.fieldName == fieldName && 
@@ -66,11 +123,16 @@ class InventoryService {
         .toSet()
         .toList();
     
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('rows');
+    }
+    
     return rows..sort();
   }
   
-  // Get all vines for a specific row in a field
-  Future<List<Vine>> getVinesForRow(String vineyardName, String fieldName, String row) async {
+  // Get all vines for a specific row in a field from local data (fast)
+  Future<List<Vine>> getVinesForRow(String vineyardName, String fieldName, String row, {bool backgroundRefresh = true}) async {
     // Convert row string to integer
     int? rowNumber;
     try {
@@ -80,7 +142,8 @@ class InventoryService {
       return [];
     }
     
-    final vines = await _repository.getAllVines();
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     final rowVines = vines
         .where((v) => v.vineyardName == vineyardName && 
                      v.fieldName == fieldName && 
@@ -92,21 +155,23 @@ class InventoryService {
       (a.spotNumber ?? 0).compareTo(b.spotNumber ?? 0)
     );
     
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('vines');
+    }
+    
     return rowVines;
   }
   
-  // Get variety summary (counts by variety)
-  Future<Map<String, int>> getVarietySummary({bool forceRefresh = false}) async {
-    // Only force refresh if explicitly requested
-    if (forceRefresh && _repository.isOnline && _repository.isAuthenticated) {
-      await _repository.syncLocalVinesToAPI();
-      
-      // After syncing, force a fresh fetch to ensure we have the latest data
-      await _repository.getAllVines();
-    }
+  // Get variety summary (counts by variety) from local data (fast)
+  Future<Map<String, int>> getVarietySummary({bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     
-    // Get fresh data from repository
-    final vines = await _repository.getAllVines();
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('varieties');
+    }
     final Map<String, int> varietyCounts = {};
     int unknownCount = 0;
     
@@ -162,18 +227,34 @@ class InventoryService {
     return varietyCounts;
   }
   
-  // Get vineyard summary (counts by vineyard)
-  Future<Map<String, int>> getVineyardSummary({bool forceRefresh = false}) async {
-    // Only force refresh if explicitly requested
-    if (forceRefresh && _repository.isOnline && _repository.isAuthenticated) {
-      await _repository.syncLocalVinesToAPI();
-    }
+  // Get vineyard summary (counts by vineyard) from local data (fast)
+  Future<Map<String, int>> getVineyardSummary({bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     
-    // Get fresh data from repository
-    final vines = await _repository.getAllVines();
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('vineyard_summary');
+    }
     final Map<String, int> vineyardCounts = {};
     
+    // DEBUG: Enhanced logging for vineyard debugging
+    print('DEBUG: Processing ${vines.length} vines for vineyard summary');
+    Map<String, int> vineyardNameAnalysis = {};
+    int nullCount = 0;
+    int emptyCount = 0;
+    Set<String> uniqueVineyards = {};
+    
     for (var vine in vines) {
+      if (vine.vineyardName == null) {
+        nullCount++;
+      } else if (vine.vineyardName!.isEmpty) {
+        emptyCount++;
+      } else {
+        uniqueVineyards.add(vine.vineyardName!);
+        vineyardNameAnalysis[vine.vineyardName!] = (vineyardNameAnalysis[vine.vineyardName!] ?? 0) + 1;
+      }
+      
       if (vine.vineyardName != null && vine.vineyardName!.isNotEmpty) {
         vineyardCounts[vine.vineyardName!] = (vineyardCounts[vine.vineyardName!] ?? 0) + 1;
       } else {
@@ -181,20 +262,35 @@ class InventoryService {
       }
     }
     
-    print('DEBUG: Calculated vineyard summary: ${vineyardCounts.entries.map((e) => '${e.key}: ${e.value}').join(', ')}');
+    print('DEBUG: Vineyard analysis - null: $nullCount, empty: $emptyCount, unique vineyards: ${uniqueVineyards.length}');
+    print('DEBUG: Unique vineyard names found: ${uniqueVineyards.join(', ')}');
+    print('DEBUG: Calculated vineyard summary from ${vines.length} total vines:');
+    print('DEBUG: Vineyard counts: ${vineyardCounts.entries.map((e) => '${e.key}: ${e.value}').join(', ')}');
+    
+    // Debug: Show unique vineyard names in database
+    final uniqueVineyardNames = vines
+        .where((v) => v.vineyardName != null && v.vineyardName!.isNotEmpty)
+        .map((v) => v.vineyardName!)
+        .toSet()
+        .toList()..sort();
+    print('DEBUG: Unique vineyards in database: ${uniqueVineyardNames.join(', ')}');
+    
+    // Debug: Count null/empty vineyard names
+    final nullVineyardCount = vines.where((v) => v.vineyardName == null || v.vineyardName!.isEmpty).length;
+    print('DEBUG: Vines with null/empty vineyard names: $nullVineyardCount');
     
     return vineyardCounts;
   }
   
-  // Get field summary for a vineyard (counts by field)
-  Future<Map<String, int>> getFieldSummary(String vineyardName, {bool forceRefresh = false}) async {
-    // Only force refresh if explicitly requested
-    if (forceRefresh && _repository.isOnline && _repository.isAuthenticated) {
-      await _repository.syncLocalVinesToAPI();
-    }
+  // Get field summary for a vineyard (counts by field) from local data (fast)
+  Future<Map<String, int>> getFieldSummary(String vineyardName, {bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     
-    // Get fresh data from repository
-    final vines = await _repository.getAllVines();
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('field_summary');
+    }
     final Map<String, int> fieldCounts = {};
     
     for (var vine in vines.where((v) => v.vineyardName == vineyardName)) {
@@ -210,10 +306,16 @@ class InventoryService {
     return fieldCounts;
   }
   
-  // Get variety counts for a specific field
-  Future<Map<String, int>> getVarietyCountsForField(String vineyardName, String fieldName) async {
-    final vines = await _repository.getAllVines();
+  // Get variety counts for a specific field from local data (fast)
+  Future<Map<String, int>> getVarietyCountsForField(String vineyardName, String fieldName, {bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     final Map<String, int> varietyCounts = {};
+    
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('variety_counts');
+    }
     
     for (var vine in vines.where((v) => 
         v.vineyardName == vineyardName && 
@@ -225,15 +327,15 @@ class InventoryService {
     return varietyCounts;
   }
   
-  // Get health summary (count of alive vs dead vines)
-  Future<Map<String, int>> getHealthSummary({bool forceRefresh = false}) async {
-    // Only force refresh if explicitly requested
-    if (forceRefresh && _repository.isOnline && _repository.isAuthenticated) {
-      await _repository.syncLocalVinesToAPI();
-    }
+  // Get health summary (count of alive vs dead vines) from local data (fast)
+  Future<Map<String, int>> getHealthSummary({bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
     
-    // Get fresh data from repository
-    final vines = await _repository.getAllVines();
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('health_summary');
+    }
     int alive = 0;
     int dead = 0;
     
@@ -255,9 +357,16 @@ class InventoryService {
     return result;
   }
   
-  // Get total vine count
-  Future<int> getTotalVineCount() async {
-    final vines = await _repository.getAllVines();
+  // Get total vine count from local data (fast)
+  Future<int> getTotalVineCount({bool backgroundRefresh = true}) async {
+    // Get data from local database immediately (fast)
+    final vines = await _repository.getLocalVines();
+    
+    // Start background refresh if requested and online
+    if (backgroundRefresh && _repository.isOnline && _repository.isAuthenticated) {
+      _startBackgroundSyncWithNotification('total_count');
+    }
+    
     return vines.length;
   }
 }

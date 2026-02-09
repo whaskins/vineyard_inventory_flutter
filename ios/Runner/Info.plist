@@ -36,6 +36,10 @@
 	<string>This app does not use the microphone</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This app needs photo library access to import QR codes from gallery</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app uses your location to tag vine GPS coordinates and show your position on the map</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>This app uses your location to tag vine GPS coordinates and show your position on the map</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

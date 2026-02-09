@@ -4,10 +4,12 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/vine.dart';
 import '../models/maintenance.dart';
 import '../models/issue.dart';
+import '../models/sync_models.dart';
 import 'database_service.dart';
 import 'api/auth_service.dart';
 import 'api/vine_api_service.dart';
@@ -19,6 +21,80 @@ class Repository {
   factory Repository() => _instance;
   
   Repository._internal();
+  
+  // Dispose method to clean up resources
+  void dispose() {
+    _connectivityTimer?.cancel();
+    _pendingVineChanges.clear();
+    _pendingMaintenanceTypeChanges.clear();
+    _pendingMaintenanceActivityChanges.clear();
+    _pendingIssueChanges.clear();
+  }
+
+  // Sync timestamp management methods
+  Future<void> _loadLastSyncTimestamp() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final timestampString = prefs.getString(_lastSyncKey);
+      if (timestampString != null) {
+        _lastSyncTimestamp = DateTime.parse(timestampString);
+        print('DEBUG: Loaded last sync timestamp: $_lastSyncTimestamp');
+      } else {
+        // If no previous sync, use a timestamp from a week ago to get recent changes
+        _lastSyncTimestamp = DateTime.now().subtract(const Duration(days: 7));
+        print('DEBUG: No previous sync timestamp, using: $_lastSyncTimestamp');
+      }
+    } catch (e) {
+      print('DEBUG: Error loading last sync timestamp: $e');
+      _lastSyncTimestamp = DateTime.now().subtract(const Duration(days: 7));
+    }
+  }
+
+  Future<void> _saveLastSyncTimestamp(DateTime timestamp) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_lastSyncKey, timestamp.toIso8601String());
+      _lastSyncTimestamp = timestamp;
+      print('DEBUG: Saved last sync timestamp: $timestamp');
+    } catch (e) {
+      print('DEBUG: Error saving last sync timestamp: $e');
+    }
+  }
+
+  DateTime? get lastSyncTimestamp => _lastSyncTimestamp;
+
+  // Check if the org_id changed since last session; if so, clear local data
+  Future<void> _checkOrgChange() async {
+    try {
+      final currentOrgId = _authService.currentOrgId;
+      if (currentOrgId == null) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      final lastOrgId = prefs.getInt(_lastOrgIdKey);
+
+      if (lastOrgId != null && lastOrgId != currentOrgId) {
+        print('DEBUG: Org changed from $lastOrgId to $currentOrgId, clearing local data');
+        await _databaseService.clearAllData();
+        _lastSyncTimestamp = null;
+        await prefs.remove(_lastSyncKey);
+      }
+
+      await prefs.setInt(_lastOrgIdKey, currentOrgId);
+    } catch (e) {
+      print('DEBUG: Error checking org change: $e');
+    }
+  }
+
+  // DEBUG: Reset sync timestamp to force downloading recent data
+  Future<void> resetSyncTimestamp(Duration goBack) async {
+    try {
+      final newTimestamp = DateTime.now().subtract(goBack);
+      await _saveLastSyncTimestamp(newTimestamp);
+      print('DEBUG: Reset sync timestamp to $newTimestamp (going back ${goBack.inHours} hours)');
+    } catch (e) {
+      print('DEBUG: Error resetting sync timestamp: $e');
+    }
+  }
 
   // Services
   final DatabaseService _databaseService = DatabaseService();
@@ -30,95 +106,107 @@ class Repository {
   // Connectivity
   final Connectivity _connectivity = Connectivity();
   bool _isOnline = false;
+  Timer? _connectivityTimer;
   
+  // Change tracking for efficient syncing
+  final Set<String> _pendingVineChanges = <String>{};
+  final Set<int> _pendingMaintenanceTypeChanges = <int>{};
+  final Set<int> _pendingMaintenanceActivityChanges = <int>{};
+  final Set<int> _pendingIssueChanges = <int>{};
+  
+  // Sync timestamp management
+  static const String _lastSyncKey = 'last_sync_timestamp';
+  static const String _lastOrgIdKey = 'last_local_org_id';
+  DateTime? _lastSyncTimestamp;
+
   // Initialize repository
   Future<void> initialize() async {
     // Initialize database
     await _databaseService.database;
-    
+
+    // Load last sync timestamp
+    await _loadLastSyncTimestamp();
+
+    // Check if org changed since last session and clear local data if so
+    await _checkOrgChange();
+
     // Check initial connectivity
     _isOnline = await _checkConnectivity();
-    print('DEBUG: Initial network connectivity: ${_isOnline ? 'online' : 'offline'}');
+    print('DEBUG: Initial backend connectivity: ${_isOnline ? 'online' : 'offline'}');
     
-    // Listen for connectivity changes
+    // Start periodic connectivity checking every 30 seconds
+    _startPeriodicConnectivityCheck();
+    
+    // Listen for network state changes (WiFi/cellular changes)
     _connectivity.onConnectivityChanged.listen((result) async {
-      final wasOnline = _isOnline;
-      _isOnline = await _checkConnectivity();
-      
-      print('DEBUG: Network connectivity changed: ${_isOnline ? 'online' : 'offline'}');
-      
-      // If we just came online, attempt to sync data with the API in the background
-      if (!wasOnline && _isOnline) {
-        // Short delay to ensure network is stable
-        await Future.delayed(const Duration(seconds: 2));
-        
-        // Check connectivity again to make sure we're still online
-        if (!await _checkConnectivity()) {
-          print('DEBUG: Lost connectivity during sync delay, aborting sync');
-          return;
-        }
-        
-        if (_authService.isAuthenticated()) {
-          print('DEBUG: Regained connectivity, triggering background sync...');
-          
-          // Use a microtask to run sync in the background without blocking the UI
-          Future.microtask(() async {
-            try {
-              print('DEBUG: Starting background sync after connectivity restored');
-              
-              // Sync all local vines to API
-              final syncVinesCount = await syncLocalVinesToAPI();
-              print('DEBUG: Synced $syncVinesCount vines to API after connectivity restored');
-              
-              // Sync all local maintenance types to API
-              final syncTypesCount = await syncLocalMaintenanceTypesToAPI();
-              print('DEBUG: Synced $syncTypesCount maintenance types to API after connectivity restored');
-              
-              // Sync all local maintenance activities to API
-              final syncActivitiesCount = await syncLocalMaintenanceActivitiesToAPI();
-              print('DEBUG: Synced $syncActivitiesCount maintenance activities to API after connectivity restored');
-              
-              // Then get all vines from API to ensure we have the latest data
-              final vines = await getAllVines();
-              print('DEBUG: Retrieved ${vines.length} vines from API after connectivity restored');
-              
-              print('DEBUG: Background sync after connectivity change completed successfully');
-            } catch (e) {
-              print('DEBUG: Error in background sync after connectivity change: $e');
-            }
-          });
-        } else {
-          print('DEBUG: Not authenticated, skipping auto-sync after connectivity change');
-        }
-      }
+      print('DEBUG: Network state changed to: $result');
+      // Trigger an immediate connectivity check
+      await _performConnectivityCheck();
     });
   }
   
-  // Check if device is online
+  // Check if backend server is reachable
   Future<bool> _checkConnectivity() async {
-    // For web, always assume online for now - we'll check later with actual requests
-    if (kIsWeb) {
-      try {
-        // Use a simple HTTP request instead of InternetAddress lookup for web
-        final response = await http.get(Uri.parse('https://www.google.com'));
-        return response.statusCode == 200;
-      } catch (e) {
-        print('DEBUG: Web connectivity check failed: $e');
-        return false;
-      }
-    } else {
-      // For mobile, use the usual approach
-      try {
-        final result = await InternetAddress.lookup('example.com');
-        return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
-      } on SocketException catch (_) {
-        return false;
-      }
+    try {
+      print('DEBUG: Checking backend connectivity...');
+      
+      // Just check if the server is responding at all (even with 404/401 means it's up)
+      final response = await http.get(
+        Uri.parse('http://amdmini01.isleta.abqwebdev.com:8080/api/v1/vines'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 5));
+      
+      // Backend is online if we get ANY HTTP response (even 404 means server is running)
+      bool isOnline = response.statusCode >= 200 && response.statusCode < 500;
+      print('DEBUG: Backend connectivity check - Status: ${response.statusCode}, Online: $isOnline');
+      return isOnline;
+    } catch (e) {
+      // Only return false if we can't connect at all (network/connection errors)
+      print('DEBUG: Backend connectivity failed: $e');
+      return false;
     }
   }
   
   // Get current connectivity status
   bool get isOnline => _isOnline;
+  
+  // Start periodic connectivity checking
+  void _startPeriodicConnectivityCheck() {
+    _connectivityTimer?.cancel();
+    _connectivityTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+      _performConnectivityCheck();
+    });
+  }
+  
+  // Perform connectivity check and handle state changes
+  Future<void> _performConnectivityCheck() async {
+    final wasOnline = _isOnline;
+    _isOnline = await _checkConnectivity();
+    
+    if (wasOnline != _isOnline) {
+      print('DEBUG: Backend connectivity changed: ${_isOnline ? 'online' : 'offline'}');
+      
+      // If we just came online, trigger a single background sync (not continuous)
+      if (!wasOnline && _isOnline && _authService.isAuthenticated()) {
+        print('DEBUG: Backend restored, triggering ONE-TIME background sync...');
+        
+        // Use a microtask to run sync in the background
+        Future.microtask(() async {
+          try {
+            print('DEBUG: Starting one-time background sync after backend restored');
+            
+            // Use efficient delta sync method
+            final syncVinesCount = await syncWithDeltaMethod();
+            print('DEBUG: Synced $syncVinesCount pending changes to API after backend restored');
+            
+            print('DEBUG: One-time background sync after backend restoration completed successfully');
+          } catch (e) {
+            print('DEBUG: Error in one-time background sync after backend restoration: $e');
+          }
+        });
+      }
+    }
+  }
   
   // Auth methods
   Future<bool> login(String email, String password) async {
@@ -128,21 +216,25 @@ class Repository {
     
     try {
       await _authService.login(email, password);
-      
+
+      // Clear local data and save new org_id
+      print('DEBUG: Login successful, clearing local data before sync...');
+      await _databaseService.clearAllData();
+      final newOrgId = _authService.currentOrgId;
+      if (newOrgId != null) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt(_lastOrgIdKey, newOrgId);
+      }
+
       // After successful login, trigger background sync
-      print('DEBUG: Login successful, triggering background sync...');
-      
+      print('DEBUG: Triggering background sync...');
+
       // Use a microtask to run sync in the background without blocking the UI
       Future.microtask(() async {
         try {
           print('DEBUG: Starting background sync after login');
-          
-          // First sync any local unsynced data to the API
-          await syncLocalVinesToAPI();
-          await syncLocalMaintenanceTypesToAPI();
-          await syncLocalMaintenanceActivitiesToAPI();
-          
-          // Then force a complete refresh of all data from the API
+
+          // Force a complete refresh of all data from the API
           await forceRefreshFromAPI();
           
           print('DEBUG: Background sync completed successfully');
@@ -413,14 +505,27 @@ class Repository {
     }
   }
   
-  Future<bool> register(String email, String password, String fullName) async {
+  Future<bool> register(String email, String password, String fullName, {required String inviteCode}) async {
     if (!_isOnline) {
       throw Exception('Internet connection required for registration');
     }
-    
+
     try {
-      await _authService.register(email, password, fullName);
+      await _authService.register(email, password, fullName, inviteCode: inviteCode);
       return true;
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> registerWithOrg(String email, String password, String fullName, String orgName) async {
+    if (!_isOnline) {
+      throw Exception('Internet connection required for registration');
+    }
+
+    try {
+      final result = await _authService.registerWithOrg(email, password, fullName, orgName);
+      return result;
     } catch (e) {
       rethrow;
     }
@@ -497,65 +602,70 @@ class Repository {
     return await _databaseService.getAllVines();
   }
   
-  // Start background vine sync (non-blocking)
+  // Sync lock to prevent concurrent sync operations
+  bool _isSyncing = false;
+
+  // Start background vine sync (non-blocking, optimized for UI smoothness)
   Future<void> startBackgroundVineSync() async {
     if (!_isOnline || !_authService.isAuthenticated()) {
       print('DEBUG: Cannot start background sync - offline or not authenticated');
       return;
     }
     
-    print('DEBUG: Starting background vine sync');
+    // Prevent concurrent sync operations
+    if (_isSyncing) {
+      print('DEBUG: Background sync already in progress, skipping duplicate request');
+      return;
+    }
+    
+    _isSyncing = true;
+    print('DEBUG: Starting efficient background vine sync using delta method');
     
     try {
-      // Get API vines in background
-      List<Vine> apiVines = await _vineApiService.getAllVines();
-      print('DEBUG: Background sync fetched ${apiVines.length} vines from API');
-      
-      // Get current local vines for comparison
-      List<Vine> localVines = await _databaseService.getAllVines();
-      print('DEBUG: Background sync comparing with ${localVines.length} local vines');
-      
-      // Create a map of local vines by alphaNumericID for easier lookup
-      final Map<String, Vine> localVineMap = {
-        for (var vine in localVines) vine.uniqueIdentifier: vine
-      };
-      
-      int inserted = 0;
-      int updated = 0;
-      
-      // Process each API vine
-      for (var apiVine in apiVines) {
-        // Clean up variety field first - convert empty strings to null
-        Vine cleanApiVine = apiVine;
-        if (apiVine.variety != null && apiVine.variety!.trim().isEmpty) {
-          cleanApiVine = apiVine.copyWith(variety: null);
-        }
-        
-        final Vine? localVine = localVineMap[cleanApiVine.alphaNumericID];
-        
-        if (localVine == null) {
-          // Vine exists in API but not locally - insert it
-          await _databaseService.insertVine(cleanApiVine);
-          inserted++;
-        } else {
-          // Check if we should update (same logic as before but simplified)
-          bool shouldUpdate = cleanApiVine.recordCreated.isAfter(
-            localVine.recordCreated.add(const Duration(seconds: 5))
-          );
-          
-          if (shouldUpdate) {
-            // Create updated vine with local ID but API data
-            Vine updatedVine = cleanApiVine.copyWith(id: localVine.id);
-            await _databaseService.updateVine(updatedVine);
-            updated++;
-          }
-        }
-      }
-      
-      print('DEBUG: Background sync completed - inserted: $inserted, updated: $updated');
+      // Use the efficient delta sync method instead of downloading all vines
+      final syncCount = await syncWithDeltaMethod();
+      print('DEBUG: Background vine sync completed - synced: $syncCount items');
     } catch (e) {
       print('DEBUG: Error in background vine sync: $e');
       rethrow;
+    } finally {
+      _isSyncing = false;
+    }
+  }
+  
+  // Batch insert vines with UI-friendly delays
+  Future<void> _batchInsertVines(List<Vine> vines) async {
+    const int batchSize = 50; // Process 50 vines at a time
+    
+    for (int i = 0; i < vines.length; i += batchSize) {
+      final batch = vines.skip(i).take(batchSize).toList();
+      print('DEBUG: Processing insert batch ${(i ~/ batchSize) + 1} with ${batch.length} vines');
+      
+      // Use database batch operation instead of individual inserts
+      await _databaseService.batchInsertVines(batch);
+      
+      // Small delay to keep UI responsive
+      if (i + batchSize < vines.length) {
+        await Future.delayed(const Duration(milliseconds: 20));
+      }
+    }
+  }
+  
+  // Batch update vines with UI-friendly delays
+  Future<void> _batchUpdateVines(List<Vine> vines) async {
+    const int batchSize = 50; // Process 50 vines at a time
+    
+    for (int i = 0; i < vines.length; i += batchSize) {
+      final batch = vines.skip(i).take(batchSize).toList();
+      print('DEBUG: Processing update batch ${(i ~/ batchSize) + 1} with ${batch.length} vines');
+      
+      // Use database batch operation instead of individual updates
+      await _databaseService.batchUpdateVines(batch);
+      
+      // Small delay to keep UI responsive
+      if (i + batchSize < vines.length) {
+        await Future.delayed(const Duration(milliseconds: 20));
+      }
     }
   }
 
@@ -681,16 +791,17 @@ class Repository {
       nursery: vine.nursery,
       variety: vine.variety,
       rootstock: vine.rootstock,
-      vineyardName: vine.vineyardName,
-      fieldName: vine.fieldName,
-      rowNumber: vine.rowNumber,
-      spotNumber: vine.spotNumber,
       isDead: vine.isDead,
       dateDied: vine.dateDied,
       recordCreated: vine.recordCreated,
+      location: vine.location,
     );
     
     print('DEBUG: Local database insert completed, new ID: ${localVine.id}');
+    
+    // Track this vine as pending sync
+    _pendingVineChanges.add(vine.alphaNumericID!);
+    print('DEBUG: Added ${vine.alphaNumericID} to pending changes (${_pendingVineChanges.length} total)');
     
     // If online and authenticated, insert into API
     if (_isOnline && _authService.isAuthenticated()) {
@@ -735,11 +846,36 @@ class Repository {
     }
   }
   
+  // Check if a vine location already exists for this position and vine
+  Future<bool> vineLocationExists(String vineyardName, String fieldName, int rowNumber, int spotNumber, String? alphaNumericId) async {
+    // For now, we'll check via API since vine_locations are primarily backend-managed
+    if (_isOnline && _authService.isAuthenticated()) {
+      try {
+        print('DEBUG: Checking if vine location exists: $vineyardName/$fieldName/Row$rowNumber/Spot$spotNumber for vine $alphaNumericId');
+        
+        // Use the API to check if location exists - we'll add a query parameter approach
+        final response = await _vineApiService.checkVineLocationExists(vineyardName, fieldName, rowNumber, spotNumber, alphaNumericId);
+        return response;
+      } catch (e) {
+        print('DEBUG: Error checking vine location existence: $e');
+        // If we can't check, assume it doesn't exist to allow creation
+        return false;
+      }
+    } else {
+      // If offline, assume it doesn't exist to allow creation
+      return false;
+    }
+  }
+  
   Future<Vine> updateVine(Vine vine) async {
     // Update local database
     print('DEBUG: Updating vine in repository: ${vine.alphaNumericID}, ID: ${vine.id}');
     await _databaseService.updateVine(vine);
     print('DEBUG: Local database update completed');
+    
+    // Track this vine as pending sync
+    _pendingVineChanges.add(vine.alphaNumericID!);
+    print('DEBUG: Added ${vine.alphaNumericID} to pending changes (${_pendingVineChanges.length} total)');
     
     // If online and authenticated, update API
     if (_isOnline && _authService.isAuthenticated()) {
@@ -1540,25 +1676,37 @@ class Repository {
     }
   }
   
-  // Sync all local vines to the API with timestamp-based conflict resolution
-  Future<int> syncLocalVinesToAPI() async {
+  // Sync only pending vine changes to the API
+  Future<int> syncPendingChangesToAPI() async {
     if (!_isOnline || !_authService.isAuthenticated()) {
-      print('DEBUG: Cannot sync vines - offline or not authenticated');
+      print('DEBUG: Cannot sync pending changes - offline or not authenticated');
+      return 0;
+    }
+    
+    if (_pendingVineChanges.isEmpty) {
+      print('DEBUG: No pending vine changes to sync');
       return 0;
     }
     
     try {
-      print('DEBUG: Starting sync of all local vines to API with timestamp-based conflict resolution');
+      print('DEBUG: Starting sync of ${_pendingVineChanges.length} pending vine changes to API');
       
-      // Get all vines from local database
-      List<Vine> localVines = await _databaseService.getAllVines();
-      print('DEBUG: Found ${localVines.length} local vines to sync');
+      // Get only the vines that have pending changes
+      List<Vine> vinesToSync = [];
+      for (String alphaNumericId in _pendingVineChanges) {
+        final vine = await _databaseService.getVineByAlphaNumericID(alphaNumericId);
+        if (vine != null) {
+          vinesToSync.add(vine);
+        }
+      }
+      print('DEBUG: Found ${vinesToSync.length} pending vines to sync');
       
       int syncCount = 0;
       List<String> failedVines = [];
+      Set<String> successfullySynced = <String>{};
       
-      // For each local vine, send to API if local data is newer
-      for (var localVine in localVines) {
+      // For each pending vine, send to API
+      for (var localVine in vinesToSync) {
         try {
           // Check if we're still online before each API call
           if (!await _checkConnectivity()) {
@@ -1613,11 +1761,13 @@ class Repository {
                   print('DEBUG: Local vine ${localVine.uniqueIdentifier} is newer than API, updating API');
                   await _vineApiService.updateVine(localVine);
                   syncCount++;
+                  successfullySynced.add(localVine.alphaNumericID!);
                   print('DEBUG: Successfully updated API with newer local data for ${localVine.uniqueIdentifier}');
                 } else {
                   // API data is newer, update local
                   print('DEBUG: API vine ${localVine.uniqueIdentifier} is newer than local, updating local database');
                   await _databaseService.updateVine(existingApiVine);
+                  successfullySynced.add(localVine.alphaNumericID!);
                   print('DEBUG: Successfully updated local database with newer API data for ${localVine.uniqueIdentifier}');
                 }
               } else {
@@ -1628,6 +1778,7 @@ class Repository {
               print('DEBUG: Vine ${localVine.uniqueIdentifier} not in API or is untagged, syncing with API');
               await _vineApiService.syncVine(localVine);
               syncCount++;
+              successfullySynced.add(localVine.alphaNumericID!);
               print('DEBUG: Successfully synced vine ${localVine.uniqueIdentifier}');
             }
           } catch (e) {
@@ -1639,6 +1790,7 @@ class Repository {
                 // Use syncVine method which handles both tagged and untagged vines
                 await _vineApiService.syncVine(localVine);
                 syncCount++;
+                successfullySynced.add(localVine.alphaNumericID!);
                 print('DEBUG: Successfully synced new vine ${localVine.uniqueIdentifier} after 404');
               } catch (createError) {
                 print('DEBUG: Failed to create vine after 404: $createError');
@@ -1657,14 +1809,212 @@ class Repository {
         }
       }
       
+      // Remove successfully synced vines from pending changes
+      _pendingVineChanges.removeAll(successfullySynced);
+      print('DEBUG: Removed ${successfullySynced.length} successfully synced vines from pending changes');
+      print('DEBUG: ${_pendingVineChanges.length} vines still pending sync');
+      
       if (failedVines.isNotEmpty) {
         print('DEBUG: Failed to sync ${failedVines.length} vines: ${failedVines.join(', ')}');
       }
       
-      print('DEBUG: Successfully synced $syncCount out of ${localVines.length} vines');
+      print('DEBUG: Successfully synced $syncCount out of ${vinesToSync.length} pending vines');
       return syncCount;
     } catch (e) {
-      print('DEBUG: Error in syncLocalVinesToAPI: $e');
+      print('DEBUG: Error in syncPendingChangesToAPI: $e');
+      return 0;
+    }
+  }
+  
+  // Add method to manually trigger sync of pending changes
+  Future<int> syncPendingChangesManually() async {
+    return await syncWithDeltaMethod();
+  }
+  
+  // Get count of pending changes
+  int get pendingChangesCount => _pendingVineChanges.length;
+  
+  // Check if there are pending changes
+  bool get hasPendingChanges => _pendingVineChanges.isNotEmpty;
+  
+  // Clear all pending changes (use with caution)
+  void clearPendingChanges() {
+    _pendingVineChanges.clear();
+    _pendingMaintenanceTypeChanges.clear();
+    _pendingMaintenanceActivityChanges.clear();
+    _pendingIssueChanges.clear();
+    print('DEBUG: Cleared all pending changes');
+  }
+
+  // New Efficient Delta Sync Method
+  Future<int> syncWithDeltaMethod() async {
+    if (!_isOnline || !_authService.isAuthenticated()) {
+      print('DEBUG: Cannot sync - offline or not authenticated');
+      return 0;
+    }
+
+    if (_lastSyncTimestamp == null) {
+      print('DEBUG: No last sync timestamp, performing initial sync');
+      return await _performInitialSync();
+    }
+
+    try {
+      print('DEBUG: Starting efficient delta sync since $_lastSyncTimestamp');
+      
+      // Step 1: Upload pending changes to server
+      final uploadCount = await _uploadPendingChanges();
+      
+      // Step 2: Download server changes since last sync
+      final downloadCount = await _downloadServerChanges();
+      
+      // Step 3: Update last sync timestamp
+      await _saveLastSyncTimestamp(DateTime.now());
+      
+      final totalSynced = uploadCount + downloadCount;
+      print('DEBUG: Delta sync completed - uploaded: $uploadCount, downloaded: $downloadCount, total: $totalSynced');
+      
+      return totalSynced;
+    } catch (e) {
+      print('DEBUG: Error in delta sync: $e');
+      return 0;
+    }
+  }
+
+  Future<int> _performInitialSync() async {
+    try {
+      print('DEBUG: Performing initial sync');
+      
+      // For initial sync, just upload pending changes and mark sync time
+      final uploadCount = await _uploadPendingChanges();
+      
+      // Set initial sync timestamp to now (we'll get deltas from here forward)
+      await _saveLastSyncTimestamp(DateTime.now());
+      
+      print('DEBUG: Initial sync completed - uploaded: $uploadCount items');
+      return uploadCount;
+    } catch (e) {
+      print('DEBUG: Error in initial sync: $e');
+      return 0;
+    }
+  }
+
+  Future<int> _uploadPendingChanges() async {
+    if (_pendingVineChanges.isEmpty) {
+      print('DEBUG: No pending vine changes to upload');
+      return 0;
+    }
+
+    try {
+      print('DEBUG: Uploading ${_pendingVineChanges.length} pending vine changes');
+      
+      // Collect pending vines
+      final vinesToUpload = <Vine>[];
+      for (final alphaNumericId in _pendingVineChanges) {
+        final vine = await _databaseService.getVineByAlphaNumericID(alphaNumericId);
+        if (vine != null) {
+          vinesToUpload.add(vine);
+        }
+      }
+      
+      if (vinesToUpload.isEmpty) {
+        print('DEBUG: No valid vines found for pending changes');
+        _pendingVineChanges.clear();
+        return 0;
+      }
+
+      // Create batch sync request
+      final syncRequest = VineSyncRequest(
+        vines: vinesToUpload,
+        vineLocations: [], // We can add vine locations here if needed
+      );
+
+      // Upload to server
+      final syncResponse = await _vineApiService.batchSync(syncRequest);
+      
+      // Handle conflicts (for now, just log them)
+      if (syncResponse.conflicts.isNotEmpty) {
+        print('DEBUG: Sync conflicts detected: ${syncResponse.conflicts.length}');
+        for (final conflict in syncResponse.conflicts) {
+          print('DEBUG: Conflict in ${conflict.type} ${conflict.id}: ${conflict.conflictReason}');
+        }
+      }
+
+      // Update local database with server responses
+      for (final serverVine in syncResponse.updatedVines) {
+        await _databaseService.updateVine(serverVine);
+      }
+
+      // Clear successfully synced items from pending changes
+      final syncedIds = syncResponse.updatedVines
+          .where((v) => v.alphaNumericID != null)
+          .map((v) => v.alphaNumericID!)
+          .toSet();
+      _pendingVineChanges.removeAll(syncedIds);
+
+      print('DEBUG: Successfully uploaded ${syncResponse.updatedVines.length} vines');
+      return syncResponse.updatedVines.length;
+      
+    } catch (e) {
+      print('DEBUG: Error uploading pending changes: $e');
+      return 0;
+    }
+  }
+
+  Future<int> _downloadServerChanges() async {
+    if (_lastSyncTimestamp == null) return 0;
+
+    try {
+      print('DEBUG: Downloading server changes since $_lastSyncTimestamp');
+      
+      final deltaRequest = DeltaSyncRequest(
+        since: _lastSyncTimestamp!,
+        limit: 1000,
+      );
+
+      final deltaResponse = await _vineApiService.getDeltaSync(deltaRequest);
+      
+      print('DEBUG: Received ${deltaResponse.vines.length} updated vines and ${deltaResponse.vineLocations.length} updated locations');
+      
+      // Debug: Show vineyard names in the delta sync response
+      if (deltaResponse.vines.isNotEmpty) {
+        final vineyardNames = deltaResponse.vines
+            .where((v) => v.vineyardName != null && v.vineyardName!.isNotEmpty)
+            .map((v) => v.vineyardName!)
+            .toSet()
+            .toList()..sort();
+        print('DEBUG: Vineyards in delta sync: ${vineyardNames.join(', ')}');
+      }
+
+      int updateCount = 0;
+      
+      // DEBUG: Log vineyard information from delta sync
+      Set<String> vineyardsInDelta = {};
+      for (final serverVine in deltaResponse.vines) {
+        if (serverVine.vineyardName != null && serverVine.vineyardName!.isNotEmpty) {
+          vineyardsInDelta.add(serverVine.vineyardName!);
+        }
+      }
+      print('DEBUG: Delta sync contains vines from vineyards: ${vineyardsInDelta.join(', ')}');
+      
+      // Update local database with server changes
+      for (final serverVine in deltaResponse.vines) {
+        print('DEBUG: Updating vine ${serverVine.alphaNumericID} with vineyard: ${serverVine.vineyardName}');
+        await _databaseService.updateVine(serverVine);
+        updateCount++;
+      }
+
+      // Handle vine locations if we have any
+      for (final serverLocation in deltaResponse.vineLocations) {
+        // Update vine locations in database (we'd need to add this method)
+        print('DEBUG: Received vine location update: ${serverLocation.uniqueIdentifier}');
+        updateCount++;
+      }
+
+      print('DEBUG: Downloaded and applied $updateCount server changes');
+      return updateCount;
+      
+    } catch (e) {
+      print('DEBUG: Error downloading server changes: $e');
       return 0;
     }
   }

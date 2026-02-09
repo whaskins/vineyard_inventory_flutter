@@ -11,6 +11,7 @@ class ApiConfig {
   static const String vines = '/vines';
   static const String maintenance = '/maintenance';
   static const String issues = '/issues';
+  static const String organizations = '/organizations';
   
   // API request timeouts in seconds - Increased for slower connections
   static const int connectionTimeout = 30;

@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.6
   
   # QR code scanning
-  mobile_scanner: ^3.5.6
+  mobile_scanner: ^7.1.4
   
   # Local database
   sqflite: ^2.3.2
@@ -47,19 +47,22 @@ dependencies:
   provider: ^6.1.2
   
   # Camera handling
-  camera: ^0.10.5+9
+  camera: ^0.11.3
   image_picker: ^1.0.7
   
   # UI enhancements
-  flutter_form_builder: ^9.2.1
+  flutter_form_builder: ^10.3.0+1
   form_builder_validators: ^11.0.0
-  intl: ^0.19.0
+  intl: ^0.20.2
   http: ^1.4.0
-  connectivity_plus: ^6.1.4
+  connectivity_plus: ^7.0.0
   shared_preferences: ^2.3.3
-  vibration: ^1.8.4
+  vibration: ^3.1.5
   csv: ^6.0.0
   jwt_decoder: ^2.0.1
+  geolocator: ^13.0.2
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
 
 dev_dependencies:
   flutter_test:
@@ -70,7 +73,7 @@ dev_dependencies:
   # activated in the `analysis_options.yaml` file located at the root of your
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
-  flutter_lints: ^3.0.0
+  flutter_lints: ^6.0.0
   sqflite_common_ffi: ^2.3.3
 
 # For information on the generic Dart part of this file, see the

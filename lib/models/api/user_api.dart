@@ -4,6 +4,7 @@ class UserApiModel {
   final String? fullName;
   final bool isActive;
   final bool isAdmin;
+  final int? orgId;
   final String createdAt;
   final String updatedAt;
 
@@ -13,6 +14,7 @@ class UserApiModel {
     this.fullName,
     this.isActive = true,
     this.isAdmin = false,
+    this.orgId,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -25,6 +27,7 @@ class UserApiModel {
       fullName: json['full_name'],
       isActive: json['is_active'] ?? true,
       isAdmin: json['is_superuser'] ?? false, // Backend uses is_superuser instead of is_admin
+      orgId: json['org_id'],
       createdAt: json['created_at'] ?? DateTime.now().toIso8601String(),
       updatedAt: json['updated_at'] ?? DateTime.now().toIso8601String(),
     );
@@ -37,6 +40,7 @@ class UserApiModel {
       'full_name': fullName,
       'is_active': isActive,
       'is_admin': isAdmin,
+      'org_id': orgId,
     };
   }
 }
