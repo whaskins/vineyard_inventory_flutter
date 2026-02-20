@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:jwt_decoder/jwt_decoder.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:vineyard_inventory_flutter/config/api_config.dart';
 
 // Custom auth exception class
@@ -37,12 +38,18 @@ class ApiService {
   int _refreshThresholdMinutes = 60; // Refresh token if it expires in less than 60 minutes
   bool _isRefreshing = false; // Flag to prevent multiple simultaneous refresh attempts
 
+  // Secure storage for credentials
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+
   // Storage keys
   static const String _tokenKey = 'auth_token';
   static const String _emailKey = 'auth_email';
   static const String _passwordKey = 'auth_password';
   static const String _orgIdKey = 'auth_org_id';
-  
+
   // Constructor with initialization
   ApiService._internal() {
     _loadFromStorage();
@@ -53,21 +60,20 @@ class ApiService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final storedToken = prefs.getString(_tokenKey);
-      
+
       if (storedToken != null && storedToken.isNotEmpty) {
         print('DEBUG: Loaded auth token from storage');
         _token = storedToken;
-        
+
         // Check if token needs refresh
         if (_autoRefreshEnabled && _isTokenExpiring()) {
           print('DEBUG: Stored token is expiring soon, will attempt refresh');
-          
-          // Also load credentials for refresh
-          _lastEmail = prefs.getString(_emailKey);
-          _lastPassword = prefs.getString(_passwordKey);
-          
+
+          // Load credentials from secure storage for refresh
+          _lastEmail = await _secureStorage.read(key: _emailKey);
+          _lastPassword = await _secureStorage.read(key: _passwordKey);
+
           if (_lastEmail != null && _lastPassword != null) {
-            // Queue the refresh but don't wait for it
             _refreshToken();
           } else {
             print('DEBUG: Cannot refresh token - credentials not found');
@@ -76,10 +82,25 @@ class ApiService {
       } else {
         print('DEBUG: No stored auth token found');
       }
-      
-      // Load credentials anyway for future refreshes
-      _lastEmail = prefs.getString(_emailKey);
-      _lastPassword = prefs.getString(_passwordKey);
+
+      // Load credentials from secure storage for future refreshes
+      _lastEmail = await _secureStorage.read(key: _emailKey);
+      _lastPassword = await _secureStorage.read(key: _passwordKey);
+
+      // Migrate: if credentials exist in SharedPreferences, move to secure storage
+      final oldEmail = prefs.getString(_emailKey);
+      final oldPassword = prefs.getString(_passwordKey);
+      if (oldEmail != null || oldPassword != null) {
+        if (oldEmail != null && oldPassword != null) {
+          await _secureStorage.write(key: _emailKey, value: oldEmail);
+          await _secureStorage.write(key: _passwordKey, value: oldPassword);
+          _lastEmail = oldEmail;
+          _lastPassword = oldPassword;
+          print('DEBUG: Migrated credentials from SharedPreferences to secure storage');
+        }
+        await prefs.remove(_emailKey);
+        await prefs.remove(_passwordKey);
+      }
 
       // Load org_id
       if (prefs.containsKey(_orgIdKey)) {
@@ -95,8 +116,8 @@ class ApiService {
   Future<void> _saveAuthDataToStorage({String? token, String? email, String? password}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      
-      // Save token if provided
+
+      // Save token to SharedPreferences (non-sensitive)
       if (token != null) {
         if (token.isNotEmpty) {
           await prefs.setString(_tokenKey, token);
@@ -106,21 +127,21 @@ class ApiService {
           print('DEBUG: Removed auth token from storage');
         }
       }
-      
-      // Save credentials if provided
+
+      // Save credentials to secure storage (sensitive)
       if (email != null) {
         if (email.isNotEmpty) {
-          await prefs.setString(_emailKey, email);
+          await _secureStorage.write(key: _emailKey, value: email);
         } else {
-          await prefs.remove(_emailKey);
+          await _secureStorage.delete(key: _emailKey);
         }
       }
-      
+
       if (password != null) {
         if (password.isNotEmpty) {
-          await prefs.setString(_passwordKey, password);
+          await _secureStorage.write(key: _passwordKey, value: password);
         } else {
-          await prefs.remove(_passwordKey);
+          await _secureStorage.delete(key: _passwordKey);
         }
       }
     } catch (e) {
@@ -177,9 +198,9 @@ class ApiService {
       _lastPassword = null;
       _orgId = null;
       _saveAuthDataToStorage(
-        token: null,
-        email: null,
-        password: null,
+        token: '',
+        email: '',
+        password: '',
       );
       _saveOrgIdToStorage(null);
     } else {

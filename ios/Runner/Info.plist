@@ -30,6 +30,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Sign in to Vineyard Inventory with Face ID</string>
 	<key>NSCameraUsageDescription</key>
 	<string>This app needs camera access to scan QR codes and take photos of vine issues</string>
 	<key>NSMicrophoneUsageDescription</key>

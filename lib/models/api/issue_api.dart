@@ -6,6 +6,7 @@ import '../../config/api_config.dart';
 class VineIssueApiModel {
   final int? id;
   final int vineId;
+  final int? typeId;
   final String description;
   final String? photoPath;  // API's photo_path (relative path on server)
   final String? photoUrl;   // Full URL for the photo
@@ -20,6 +21,7 @@ class VineIssueApiModel {
   VineIssueApiModel({
     this.id,
     required this.vineId,
+    this.typeId,
     required this.description,
     this.photoPath,
     this.photoUrl,
@@ -64,6 +66,7 @@ class VineIssueApiModel {
     return VineIssueApiModel(
       id: json['id'],
       vineId: json['vine_id'],
+      typeId: json['type_id'],
       description: json['description'],
       photoPath: apiPhotoPath,
       photoUrl: photoUrl,
@@ -81,6 +84,7 @@ class VineIssueApiModel {
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> json = {
       'vine_id': vineId,
+      'type_id': typeId,
       'description': description,
       'date_reported': dateReported,
       'reported_by_id': reportedById,
@@ -133,6 +137,7 @@ class VineIssueApiModel {
     return VineIssue(
       id: id,
       vineID: vineId,
+      issueTypeID: typeId,
       description: description,
       photoPath: localPhotoPath,  // Only use as local path if it's an absolute path
       photoUrl: photoUrl,
@@ -149,6 +154,7 @@ class VineIssueApiModel {
     return VineIssueApiModel(
       id: issue.id,
       vineId: issue.vineID,
+      typeId: issue.issueTypeID,
       description: issue.description,
       photoPath: issue.photoPath,
       photoUrl: issue.photoUrl,

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'screens/home_screen.dart';
+import 'screens/main_shell.dart';
 import 'screens/login_screen.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
@@ -28,9 +28,6 @@ void main() async {
       DeviceOrientation.portraitDown,
     ]);
   }
-  
-  // Test API endpoints 
-  await _testApiEndpoints();
   
   // Initialize the repository (handles both local and API data)
   await Repository().initialize();
@@ -111,7 +108,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final repository = Repository();
     final isAuthenticated = repository.isAuthenticated;
-    final initialScreen = isAuthenticated ? const HomeScreen() : const LoginScreen();
+    final initialScreen = isAuthenticated ? const MainShell() : const LoginScreen();
     
     return MaterialApp(
       title: 'Vineyard Inventory',

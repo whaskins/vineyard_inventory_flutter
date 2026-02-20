@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_form_builder/flutter_form_builder.dart';
 import 'package:form_builder_validators/form_builder_validators.dart';
 import '../services/repository.dart';
-import 'home_screen.dart';
+import '../services/biometric_service.dart';
+import 'main_shell.dart';
 import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -14,9 +15,87 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormBuilderState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
   bool _isLoading = false;
   String? _errorMessage;
   final _repository = Repository();
+  final _biometricService = BiometricService();
+
+  bool _biometricAvailable = false;
+  bool _biometricEnabled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkBiometrics();
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _checkBiometrics() async {
+    final available = await _biometricService.isBiometricAvailable();
+    final enabled = await _biometricService.isBiometricLoginEnabled();
+    if (mounted) {
+      setState(() {
+        _biometricAvailable = available;
+        _biometricEnabled = enabled;
+      });
+
+      // Auto-trigger biometric login if enabled
+      if (available && enabled) {
+        _loginWithBiometrics();
+      }
+    }
+  }
+
+  Future<void> _loginWithBiometrics() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final authenticated = await _biometricService.authenticate();
+      if (!authenticated) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+
+      final credentials = await _biometricService.getCredentials();
+      if (credentials == null || credentials.email.isEmpty || credentials.password.isEmpty) {
+        // Credentials missing — disable biometrics so user isn't stuck
+        await _biometricService.setBiometricLoginEnabled(false);
+        if (mounted) {
+          setState(() {
+            _biometricEnabled = false;
+            _errorMessage = 'Stored credentials not found. Please log in with email and password, then re-enable biometrics.';
+            _isLoading = false;
+          });
+        }
+        return;
+      }
+
+      final success = await _repository.login(credentials.email, credentials.password);
+      if (success && mounted) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => const MainShell()),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Biometric login failed. Please use email and password.';
+          _isLoading = false;
+        });
+      }
+    }
+  }
 
   Future<void> _login() async {
     if (_formKey.currentState?.saveAndValidate() ?? false) {
@@ -25,21 +104,33 @@ class _LoginScreenState extends State<LoginScreen> {
         _errorMessage = null;
       });
 
-      final email = _formKey.currentState!.value['email'] as String;
-      final password = _formKey.currentState!.value['password'] as String;
+      // Read directly from controllers for reliability
+      final email = _emailController.text.trim();
+      final password = _passwordController.text;
 
       try {
         final success = await _repository.login(email, password);
-        
+
         if (success && mounted) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (context) => const HomeScreen()),
-          );
+          if (_biometricAvailable) {
+            if (_biometricEnabled) {
+              // Already enabled — silently refresh stored credentials
+              await _biometricService.saveCredentials(email, password);
+            } else {
+              // Not yet enabled — offer to enable
+              await _offerBiometricSetup(email, password);
+            }
+          }
+
+          if (mounted) {
+            Navigator.of(context).pushReplacement(
+              MaterialPageRoute(builder: (context) => const MainShell()),
+            );
+          }
         }
       } catch (e) {
         String errorMsg;
-        
-        // Handle specific error cases
+
         if (e.toString().contains('Authentication endpoint not found')) {
           errorMsg = 'Server connection error. Please try again later.';
         } else if (e.toString().contains('Invalid email or password')) {
@@ -51,7 +142,7 @@ class _LoginScreenState extends State<LoginScreen> {
         } else {
           errorMsg = 'Login failed: ${e.toString()}';
         }
-        
+
         if (mounted) {
           setState(() {
             _errorMessage = errorMsg;
@@ -62,9 +153,50 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _offerBiometricSetup(String email, String password) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enable Biometric Login'),
+        content: const Text(
+          'Would you like to use Face ID or fingerprint to sign in next time?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('NOT NOW'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('ENABLE'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true) {
+      final saved = await _biometricService.saveCredentials(email, password);
+      if (saved) {
+        await _biometricService.setBiometricLoginEnabled(true);
+        if (mounted) {
+          setState(() => _biometricEnabled = true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Biometric login enabled!')),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not save credentials. Biometric login not enabled.')),
+          );
+        }
+      }
+    }
+  }
+
   void _loginAsGuest() {
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (context) => const HomeScreen()),
+      MaterialPageRoute(builder: (context) => const MainShell()),
     );
   }
 
@@ -91,7 +223,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 color: Theme.of(context).primaryColor,
               ),
               const SizedBox(height: 24),
-              
+
               // Title
               Text(
                 'Vineyard Inventory',
@@ -102,7 +234,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 48),
-              
+
               // Login Form
               FormBuilder(
                 key: _formKey,
@@ -110,6 +242,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   children: [
                     FormBuilderTextField(
                       name: 'email',
+                      controller: _emailController,
                       decoration: const InputDecoration(
                         labelText: 'Email',
                         prefixIcon: Icon(Icons.email_outlined),
@@ -124,6 +257,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     const SizedBox(height: 16),
                     FormBuilderTextField(
                       name: 'password',
+                      controller: _passwordController,
                       decoration: const InputDecoration(
                         labelText: 'Password',
                         prefixIcon: Icon(Icons.lock_outlined),
@@ -158,6 +292,25 @@ class _LoginScreenState extends State<LoginScreen> {
                             : const Text('LOGIN'),
                       ),
                     ),
+
+                    // Biometric login button
+                    if (_biometricAvailable && _biometricEnabled) ...[
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: OutlinedButton.icon(
+                          onPressed: _isLoading ? null : _loginWithBiometrics,
+                          icon: const Icon(Icons.fingerprint, size: 28),
+                          label: const Text('Sign in with Biometrics'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Theme.of(context).primaryColor,
+                            side: BorderSide(color: Theme.of(context).primaryColor),
+                          ),
+                        ),
+                      ),
+                    ],
+
                     const SizedBox(height: 16),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,

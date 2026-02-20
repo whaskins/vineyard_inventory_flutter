@@ -11,6 +11,7 @@ import 'package:sqflite_common/sqlite_api.dart';
 import '../models/vine.dart';
 import '../models/maintenance.dart';
 import '../models/issue.dart';
+import '../models/issue_type.dart';
 
 class DatabaseService {
   static final DatabaseService _instance = DatabaseService._internal();
@@ -46,7 +47,7 @@ class DatabaseService {
       final db = await databaseFactory.openDatabase(
         path,
         options: OpenDatabaseOptions(
-          version: 5,
+          version: 6,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         ),
@@ -61,7 +62,7 @@ class DatabaseService {
       try {
         final db = await openDatabase(
           path,
-          version: 5,
+          version: 6,
           onCreate: _onCreate,
           onUpgrade: _onUpgrade,
         );
@@ -155,6 +156,20 @@ class DatabaseService {
       await db.execute('ALTER TABLE vines ADD COLUMN gpsAccuracy REAL');
       debugPrint('Successfully added GPS coordinate columns to vines table');
     }
+
+    if (oldVersion <= 5 && newVersion >= 6) {
+      // Add issue types table and issueTypeID column for version 6
+      debugPrint('Adding issueTypes table and issueTypeID column');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS issueTypes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT UNIQUE NOT NULL,
+          description TEXT
+        )
+      ''');
+      await db.execute('ALTER TABLE vineIssues ADD COLUMN issueTypeID INTEGER');
+      debugPrint('Successfully added issueTypes table and issueTypeID column');
+    }
   }
   
   // Create database tables
@@ -188,6 +203,15 @@ class DatabaseService {
     // Add unique constraint for location when alphaNumericID is null
     await db.execute('CREATE UNIQUE INDEX idx_vines_location ON vines(vineyardName, fieldName, rowNumber, spotNumber) WHERE alphaNumericID IS NULL');
     
+    // Issue types table
+    await db.execute('''
+      CREATE TABLE issueTypes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT
+      )
+    ''');
+
     // Maintenance types table
     await db.execute('''
       CREATE TABLE maintenanceTypes (
@@ -215,6 +239,7 @@ class DatabaseService {
       CREATE TABLE vineIssues (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         vineID INTEGER NOT NULL,
+        issueTypeID INTEGER,
         description TEXT NOT NULL,
         photoPath TEXT,
         photoUrl TEXT,
@@ -223,7 +248,8 @@ class DatabaseService {
         isResolved INTEGER NOT NULL DEFAULT 0,
         dateResolved TEXT,
         resolvedBy INTEGER,
-        FOREIGN KEY (vineID) REFERENCES vines (id) ON DELETE CASCADE
+        FOREIGN KEY (vineID) REFERENCES vines (id) ON DELETE CASCADE,
+        FOREIGN KEY (issueTypeID) REFERENCES issueTypes (id) ON DELETE SET NULL
       )
     ''');
   }
@@ -235,6 +261,7 @@ class DatabaseService {
       await txn.delete('vineIssues');
       await txn.delete('maintenanceActivities');
       await txn.delete('maintenanceTypes');
+      await txn.delete('issueTypes');
       await txn.delete('vines');
     });
     debugPrint('All local data cleared');
@@ -596,6 +623,71 @@ class DatabaseService {
     );
   }
   
+  // ISSUE TYPE OPERATIONS
+
+  // Insert a new issue type
+  Future<int> insertIssueType(IssueType type) async {
+    Database db = await database;
+    return await db.insert('issueTypes', type.toMap());
+  }
+
+  // Get all issue types
+  Future<List<IssueType>> getAllIssueTypes() async {
+    Database db = await database;
+    List<Map<String, dynamic>> maps = await db.query('issueTypes');
+    return List.generate(maps.length, (i) {
+      return IssueType.fromMap(maps[i]);
+    });
+  }
+
+  // Get an issue type by ID
+  Future<IssueType?> getIssueType(int id) async {
+    Database db = await database;
+    List<Map<String, dynamic>> maps = await db.query(
+      'issueTypes',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (maps.isNotEmpty) {
+      return IssueType.fromMap(maps.first);
+    }
+    return null;
+  }
+
+  // Update an issue type
+  Future<int> updateIssueType(IssueType type) async {
+    Database db = await database;
+    return await db.update(
+      'issueTypes',
+      type.toMap(),
+      where: 'id = ?',
+      whereArgs: [type.id],
+    );
+  }
+
+  // Delete an issue type
+  Future<int> deleteIssueType(int id) async {
+    Database db = await database;
+    return await db.delete(
+      'issueTypes',
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  // Get all unresolved issues (for problems map)
+  Future<List<Map<String, dynamic>>> getUnresolvedIssuesWithVineLocation() async {
+    Database db = await database;
+    return await db.rawQuery('''
+      SELECT vi.*, v.latitude, v.longitude, v.alphaNumericID as vineAlphaNumericID
+      FROM vineIssues vi
+      INNER JOIN vines v ON vi.vineID = v.id
+      WHERE vi.isResolved = 0
+        AND v.latitude IS NOT NULL
+        AND v.longitude IS NOT NULL
+    ''');
+  }
+
   // ISSUES OPERATIONS
   
   // Insert a new vine issue

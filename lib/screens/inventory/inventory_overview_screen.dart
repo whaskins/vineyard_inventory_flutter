@@ -6,7 +6,9 @@ import 'vineyard_list_screen.dart';
 import 'variety_list_screen.dart';
 
 class InventoryOverviewScreen extends StatefulWidget {
-  const InventoryOverviewScreen({super.key});
+  final bool embedded;
+
+  const InventoryOverviewScreen({super.key, this.embedded = false});
 
   @override
   State<InventoryOverviewScreen> createState() => _InventoryOverviewScreenState();
@@ -189,8 +191,67 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
     }
   }
 
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_errorMessage != null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              _errorMessage!,
+              style: const TextStyle(color: Colors.red),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: _loadInventoryData,
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    }
+    return TabBarView(
+      controller: _tabController,
+      children: [
+        _buildOverviewTab(),
+        _buildVarietyTab(),
+        _buildVineyardTab(),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (widget.embedded) {
+      if (_isLoading) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      if (_errorMessage != null) {
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                _errorMessage!,
+                style: const TextStyle(color: Colors.red),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _loadInventoryData,
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        );
+      }
+      return _buildOverviewTab();
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Vineyard Inventory'),
@@ -198,7 +259,6 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
         backgroundColor: Colors.green[700],
         foregroundColor: Colors.white,
         actions: [
-          // Sync button (if online)
           if (_repository.isOnline)
             IconButton(
               icon: const Icon(Icons.sync),
@@ -207,11 +267,11 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Syncing with server...'))
                 );
-                
+
                 try {
                   await _repository.syncWithDeltaMethod();
                   await _loadInventoryData();
-                  
+
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Sync completed'))
@@ -235,7 +295,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
         bottom: TabBar(
           controller: _tabController,
           labelColor: Colors.white,
-          unselectedLabelColor: Colors.white.withOpacity(0.7),
+          unselectedLabelColor: Colors.white.withValues(alpha: 0.7),
           tabs: const [
             Tab(icon: Icon(Icons.dashboard), text: 'Overview'),
             Tab(icon: Icon(Icons.wine_bar), text: 'By Variety'),
@@ -243,39 +303,7 @@ class _InventoryOverviewScreenState extends State<InventoryOverviewScreen> with 
           ],
         ),
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage != null
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        _errorMessage!,
-                        style: const TextStyle(color: Colors.red),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _loadInventoryData,
-                        child: const Text('Retry'),
-                      ),
-                    ],
-                  ),
-                )
-              : TabBarView(
-                  controller: _tabController,
-                  children: [
-                    // Overview Tab
-                    _buildOverviewTab(),
-                    
-                    // Variety Tab
-                    _buildVarietyTab(),
-                    
-                    // Vineyard Tab
-                    _buildVineyardTab(),
-                  ],
-                ),
+      body: _buildBody(),
     );
   }
 

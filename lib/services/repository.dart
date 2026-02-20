@@ -9,12 +9,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vine.dart';
 import '../models/maintenance.dart';
 import '../models/issue.dart';
+import '../models/issue_type.dart';
 import '../models/sync_models.dart';
 import 'database_service.dart';
 import 'api/auth_service.dart';
 import 'api/vine_api_service.dart';
 import 'api/maintenance_api_service.dart';
 import 'api/issue_api_service.dart';
+import 'api/issue_type_api_service.dart';
+import 'biometric_service.dart';
 
 class Repository {
   static final Repository _instance = Repository._internal();
@@ -102,6 +105,7 @@ class Repository {
   final VineApiService _vineApiService = VineApiService();
   final MaintenanceApiService _maintenanceApiService = MaintenanceApiService();
   final IssueApiService _issueApiService = IssueApiService();
+  final IssueTypeApiService _issueTypeApiService = IssueTypeApiService();
 
   // Connectivity
   final Connectivity _connectivity = Connectivity();
@@ -210,6 +214,10 @@ class Repository {
   
   // Auth methods
   Future<bool> login(String email, String password) async {
+    // Re-check connectivity on-demand rather than relying on cached flag
+    if (!_isOnline) {
+      _isOnline = await _checkConnectivity();
+    }
     if (!_isOnline) {
       throw Exception('Internet connection required for login');
     }
@@ -312,7 +320,7 @@ class Repository {
                 print('DEBUG: Updating variety for ${apiVine.alphaNumericID} from "${localVariety ?? 'null'}" to "${variety ?? 'null'}"');
               }
               
-              // Update the vine in database
+              // Update the vine in database, preserving local GPS if API lacks it
               await txn.update(
                 'vines',
                 {
@@ -327,13 +335,17 @@ class Repository {
                   'isDead': apiVine.isDead ? 1 : 0,
                   'dateDied': apiVine.dateDied?.toIso8601String(),
                   'recordCreated': apiVine.recordCreated.toIso8601String(),
+                  'updatedAt': apiVine.updatedAt?.toIso8601String(),
+                  'latitude': apiVine.location?.latitude ?? localVine.location?.latitude,
+                  'longitude': apiVine.location?.longitude ?? localVine.location?.longitude,
+                  'gpsAccuracy': apiVine.location?.gpsAccuracy ?? localVine.location?.gpsAccuracy,
                 },
                 where: 'alphaNumericID = ?',
                 whereArgs: [apiVine.alphaNumericID],
               );
               updated++;
             } else {
-              // Vine doesn't exist - insert it
+              // Vine doesn't exist - insert it with GPS data from API
               await txn.insert(
                 'vines',
                 {
@@ -349,6 +361,10 @@ class Repository {
                   'isDead': apiVine.isDead ? 1 : 0,
                   'dateDied': apiVine.dateDied?.toIso8601String(),
                   'recordCreated': apiVine.recordCreated.toIso8601String(),
+                  'updatedAt': apiVine.updatedAt?.toIso8601String(),
+                  'latitude': apiVine.location?.latitude,
+                  'longitude': apiVine.location?.longitude,
+                  'gpsAccuracy': apiVine.location?.gpsAccuracy,
                 },
               );
             }
@@ -382,9 +398,90 @@ class Repository {
       varietyStats.forEach((variety, count) {
         print('DEBUG:   $variety: $count vines');
       });
-      
+
+      // Sync empty spots from vine locations
+      await _syncEmptySpots();
+
     } catch (e) {
       print('DEBUG: Error in forceRefreshFromAPI: $e');
+    }
+  }
+
+  /// Fetch all vine locations from the API and insert empty spots
+  /// (locations with no vine planted) into the local database.
+  Future<void> _syncEmptySpots() async {
+    try {
+      print('DEBUG: Syncing empty spots from API locations/map');
+      final locations = await _vineApiService.getMapLocations();
+      print('DEBUG: Got ${locations.length} total map locations');
+
+      // Filter to only empty spots (no alpha_numeric_id)
+      final emptySpots = locations.where((loc) =>
+          loc['alpha_numeric_id'] == null &&
+          loc['latitude'] != null &&
+          loc['longitude'] != null
+      ).toList();
+      print('DEBUG: Found ${emptySpots.length} empty spots with coordinates');
+
+      if (emptySpots.isEmpty) return;
+
+      Database db = await _databaseService.database;
+      int inserted = 0;
+
+      for (final loc in emptySpots) {
+        final vineyardName = loc['vineyard_name'] as String?;
+        final fieldName = loc['field_name'] as String?;
+        final rowNumber = loc['row_number'] as int?;
+        final spotNumber = loc['spot_number'] as int?;
+
+        // Check if this location already exists locally
+        final existing = await db.query(
+          'vines',
+          where: 'vineyardName = ? AND fieldName = ? AND rowNumber = ? AND spotNumber = ? AND alphaNumericID IS NULL',
+          whereArgs: [vineyardName, fieldName, rowNumber, spotNumber],
+        );
+
+        if (existing.isEmpty) {
+          await db.insert('vines', {
+            'alphaNumericID': null,
+            'vineyardName': vineyardName,
+            'fieldName': fieldName,
+            'rowNumber': rowNumber,
+            'spotNumber': spotNumber,
+            'yearOfPlanting': loc['year_of_planting'],
+            'isDead': (loc['is_dead'] == true) ? 1 : 0,
+            'dateDied': loc['date_died'],
+            'recordCreated': loc['record_created'] ?? DateTime.now().toIso8601String(),
+            'updatedAt': loc['updated_at'],
+            'latitude': (loc['latitude'] as num?)?.toDouble(),
+            'longitude': (loc['longitude'] as num?)?.toDouble(),
+            'gpsAccuracy': (loc['gps_accuracy'] as num?)?.toDouble(),
+          });
+          inserted++;
+        } else {
+          // Update existing empty spot — only overwrite GPS if API provides it
+          final updateData = <String, dynamic>{
+            'isDead': (loc['is_dead'] == true) ? 1 : 0,
+            'dateDied': loc['date_died'],
+            'updatedAt': loc['updated_at'],
+          };
+          if (loc['latitude'] != null && loc['longitude'] != null) {
+            updateData['latitude'] = (loc['latitude'] as num).toDouble();
+            updateData['longitude'] = (loc['longitude'] as num).toDouble();
+            updateData['gpsAccuracy'] = (loc['gps_accuracy'] as num?)?.toDouble();
+          }
+          await db.update(
+            'vines',
+            updateData,
+            where: 'id = ?',
+            whereArgs: [existing.first['id']],
+          );
+        }
+      }
+
+      print('DEBUG: Inserted $inserted new empty spots');
+    } catch (e) {
+      print('DEBUG: Error syncing empty spots: $e');
     }
   }
   
@@ -452,7 +549,7 @@ class Repository {
         // Process each API vine
         for (var apiVine in apiVines) {
           try {
-            // Insert the complete vine with all fields
+            // Insert the complete vine with all fields including GPS
             await txn.insert('vines', {
               'alphaNumericID': apiVine.alphaNumericID,
               'yearOfPlanting': apiVine.yearOfPlanting,
@@ -466,6 +563,10 @@ class Repository {
               'isDead': apiVine.isDead ? 1 : 0,
               'dateDied': apiVine.dateDied?.toIso8601String(),
               'recordCreated': apiVine.recordCreated.toIso8601String(),
+              'updatedAt': apiVine.updatedAt?.toIso8601String(),
+              'latitude': apiVine.location?.latitude,
+              'longitude': apiVine.location?.longitude,
+              'gpsAccuracy': apiVine.location?.gpsAccuracy,
             });
             
             if (apiVine.variety != null && apiVine.variety!.trim().isNotEmpty) {
@@ -535,6 +636,7 @@ class Repository {
   
   void logout() {
     _authService.logout();
+    BiometricService().clearCredentials();
   }
   
   // Vine methods
@@ -553,8 +655,18 @@ class Repository {
           return apiVine;
         }
         
-        // If vine exists in both API and locally, return API version (more up-to-date)
+        // If vine exists in both API and locally, merge and return
         if (apiVine != null && vine != null) {
+          // Preserve local GPS data if the API version doesn't have it
+          if (!apiVine.hasCoordinates && vine.hasCoordinates) {
+            apiVine = apiVine.copyWith(
+              location: apiVine.location?.copyWith(
+                latitude: vine.location!.latitude,
+                longitude: vine.location!.longitude,
+                gpsAccuracy: vine.location!.gpsAccuracy,
+              ) ?? vine.location,
+            );
+          }
           // Update local copy
           await _databaseService.updateVine(apiVine);
           return apiVine;
@@ -583,6 +695,16 @@ class Repository {
           if (vine == null) {
             await _databaseService.insertVine(apiVine);
           } else {
+            // Preserve local GPS data if the API version doesn't have it
+            if (!apiVine.hasCoordinates && vine.hasCoordinates) {
+              apiVine = apiVine.copyWith(
+                location: apiVine.location?.copyWith(
+                  latitude: vine.location!.latitude,
+                  longitude: vine.location!.longitude,
+                  gpsAccuracy: vine.location!.gpsAccuracy,
+                ) ?? vine.location,
+              );
+            }
             await _databaseService.updateVine(apiVine);
           }
           return apiVine;
@@ -799,17 +921,31 @@ class Repository {
     
     print('DEBUG: Local database insert completed, new ID: ${localVine.id}');
     
-    // Track this vine as pending sync
-    _pendingVineChanges.add(vine.alphaNumericID!);
-    print('DEBUG: Added ${vine.alphaNumericID} to pending changes (${_pendingVineChanges.length} total)');
-    
+    // Track this vine as pending sync (use uniqueIdentifier to support untagged vines)
+    _pendingVineChanges.add(localVine.uniqueIdentifier);
+    print('DEBUG: Added ${localVine.uniqueIdentifier} to pending changes (${_pendingVineChanges.length} total)');
+
     // If online and authenticated, insert into API
     if (_isOnline && _authService.isAuthenticated()) {
       print('DEBUG: Online and authenticated, creating vine in API');
       try {
         Vine apiVine = await _vineApiService.createVine(localVine);
         print('DEBUG: API creation successful, returned ID: ${apiVine.id}');
-        
+
+        // Sync location data (including GPS) to the separate location endpoint
+        await _vineApiService.syncLocationForVine(localVine);
+
+        // Preserve local GPS data if the API response doesn't include it
+        if (!apiVine.hasCoordinates && localVine.hasCoordinates) {
+          apiVine = apiVine.copyWith(
+            location: apiVine.location?.copyWith(
+              latitude: localVine.location!.latitude,
+              longitude: localVine.location!.longitude,
+              gpsAccuracy: localVine.location!.gpsAccuracy,
+            ) ?? localVine.location,
+          );
+        }
+
         // Update local vine with API vine
         await _databaseService.updateVine(apiVine);
         return apiVine;
@@ -873,10 +1009,10 @@ class Repository {
     await _databaseService.updateVine(vine);
     print('DEBUG: Local database update completed');
     
-    // Track this vine as pending sync
-    _pendingVineChanges.add(vine.alphaNumericID!);
-    print('DEBUG: Added ${vine.alphaNumericID} to pending changes (${_pendingVineChanges.length} total)');
-    
+    // Track this vine as pending sync (use uniqueIdentifier to support untagged vines)
+    _pendingVineChanges.add(vine.uniqueIdentifier);
+    print('DEBUG: Added ${vine.uniqueIdentifier} to pending changes (${_pendingVineChanges.length} total)');
+
     // If online and authenticated, update API
     if (_isOnline && _authService.isAuthenticated()) {
       print('DEBUG: Online and authenticated, updating vine in API');
@@ -885,7 +1021,21 @@ class Repository {
         print('DEBUG: Syncing vine to API using syncVine method');
         Vine apiVine = await _vineApiService.syncVine(vine);
         print('DEBUG: API sync successful, returned ID: ${apiVine.id}');
-        
+
+        // Sync location data (including GPS) to the separate location endpoint
+        await _vineApiService.syncLocationForVine(vine);
+
+        // Preserve local GPS data if the API response doesn't include it
+        if (!apiVine.hasCoordinates && vine.hasCoordinates) {
+          apiVine = apiVine.copyWith(
+            location: apiVine.location?.copyWith(
+              latitude: vine.location!.latitude,
+              longitude: vine.location!.longitude,
+              gpsAccuracy: vine.location!.gpsAccuracy,
+            ) ?? vine.location,
+          );
+        }
+
         // Update local vine with API vine
         await _databaseService.updateVine(apiVine);
         return apiVine;
@@ -1253,7 +1403,7 @@ class Repository {
   Future<void> deleteMaintenanceType(int id) async {
     // Delete from local database first
     await _databaseService.deleteMaintenanceType(id);
-    
+
     // If online and authenticated, delete from API
     if (_isOnline && _authService.isAuthenticated()) {
       try {
@@ -1264,7 +1414,106 @@ class Repository {
       }
     }
   }
-  
+
+  // ISSUE TYPE OPERATIONS
+
+  // Get all issue types
+  Future<List<IssueType>> getAllIssueTypes() async {
+    List<IssueType> localTypes = await _databaseService.getAllIssueTypes();
+    print('DEBUG: Local DB has ${localTypes.length} issue types');
+
+    if (_isOnline && _authService.isAuthenticated()) {
+      print('DEBUG: Online and authenticated, fetching issue types from API');
+      try {
+        List<IssueType> apiTypes = await _issueTypeApiService.getAllIssueTypes();
+        print('DEBUG: API returned ${apiTypes.length} issue types');
+
+        final Map<String, IssueType> localTypeMap = {
+          for (var type in localTypes) type.name: type
+        };
+
+        for (var apiType in apiTypes) {
+          final IssueType? localType = localTypeMap[apiType.name];
+          if (localType == null) {
+            print('DEBUG: Inserting new issue type from API: ${apiType.name}');
+            await _databaseService.insertIssueType(apiType);
+          } else {
+            if (apiType.description != localType.description) {
+              print('DEBUG: Updating existing issue type: ${apiType.name}');
+              await _databaseService.updateIssueType(apiType);
+            }
+          }
+        }
+
+        return await _databaseService.getAllIssueTypes();
+      } catch (e) {
+        print('DEBUG: API error getting issue types: $e');
+      }
+    }
+
+    return localTypes;
+  }
+
+  // Create an issue type
+  Future<IssueType> createIssueType(IssueType type) async {
+    print('DEBUG: Inserting new issue type in repository: ${type.name}');
+
+    final id = await _databaseService.insertIssueType(type);
+    IssueType localType = IssueType(
+      id: id,
+      name: type.name,
+      description: type.description,
+    );
+
+    if (_isOnline && _authService.isAuthenticated()) {
+      print('DEBUG: Online and authenticated, creating issue type in API');
+      try {
+        IssueType apiType = await _issueTypeApiService.createIssueType(localType);
+        print('DEBUG: API creation successful, returned ID: ${apiType.id}');
+        await _databaseService.updateIssueType(apiType);
+        return apiType;
+      } catch (e) {
+        print('DEBUG: API error creating issue type: $e');
+      }
+    }
+
+    return localType;
+  }
+
+  // Update an issue type
+  Future<IssueType> updateIssueType(IssueType type) async {
+    print('DEBUG: Updating issue type in repository: ${type.name}');
+    await _databaseService.updateIssueType(type);
+
+    if (_isOnline && _authService.isAuthenticated()) {
+      print('DEBUG: Online and authenticated, updating issue type in API');
+      try {
+        IssueType apiType = await _issueTypeApiService.updateIssueType(type);
+        print('DEBUG: API update successful');
+        await _databaseService.updateIssueType(apiType);
+        return apiType;
+      } catch (e) {
+        print('DEBUG: API error updating issue type: $e');
+      }
+    }
+
+    return type;
+  }
+
+  // Delete an issue type
+  Future<void> deleteIssueType(int id) async {
+    await _databaseService.deleteIssueType(id);
+
+    if (_isOnline && _authService.isAuthenticated()) {
+      try {
+        await _issueTypeApiService.deleteIssueType(id);
+        print('DEBUG: Successfully deleted issue type from API');
+      } catch (e) {
+        print('DEBUG: API error deleting issue type: $e');
+      }
+    }
+  }
+
   // Get maintenance activities for a vine
   Future<List<MaintenanceActivity>> getMaintenanceActivitiesForVine(int vineId) async {
     // Get activities from local database
@@ -1693,8 +1942,22 @@ class Repository {
       
       // Get only the vines that have pending changes
       List<Vine> vinesToSync = [];
-      for (String alphaNumericId in _pendingVineChanges) {
-        final vine = await _databaseService.getVineByAlphaNumericID(alphaNumericId);
+      for (String identifier in _pendingVineChanges) {
+        // Try alphaNumericID lookup first
+        Vine? vine = await _databaseService.getVineByAlphaNumericID(identifier);
+        if (vine == null) {
+          // Try parsing as location-based identifier: vineyardName_fieldName_rowNumber_spotNumber
+          final parts = identifier.split('_');
+          if (parts.length >= 4) {
+            final spotNumber = int.tryParse(parts.last);
+            final rowNumber = int.tryParse(parts[parts.length - 2]);
+            if (spotNumber != null && rowNumber != null) {
+              final fieldName = parts[parts.length - 3];
+              final vineyardName = parts.sublist(0, parts.length - 3).join('_');
+              vine = await _databaseService.getVineByLocation(vineyardName, fieldName, rowNumber, spotNumber);
+            }
+          }
+        }
         if (vine != null) {
           vinesToSync.add(vine);
         }
@@ -1761,13 +2024,13 @@ class Repository {
                   print('DEBUG: Local vine ${localVine.uniqueIdentifier} is newer than API, updating API');
                   await _vineApiService.updateVine(localVine);
                   syncCount++;
-                  successfullySynced.add(localVine.alphaNumericID!);
+                  successfullySynced.add(localVine.uniqueIdentifier);
                   print('DEBUG: Successfully updated API with newer local data for ${localVine.uniqueIdentifier}');
                 } else {
                   // API data is newer, update local
                   print('DEBUG: API vine ${localVine.uniqueIdentifier} is newer than local, updating local database');
                   await _databaseService.updateVine(existingApiVine);
-                  successfullySynced.add(localVine.alphaNumericID!);
+                  successfullySynced.add(localVine.uniqueIdentifier);
                   print('DEBUG: Successfully updated local database with newer API data for ${localVine.uniqueIdentifier}');
                 }
               } else {
@@ -1778,7 +2041,7 @@ class Repository {
               print('DEBUG: Vine ${localVine.uniqueIdentifier} not in API or is untagged, syncing with API');
               await _vineApiService.syncVine(localVine);
               syncCount++;
-              successfullySynced.add(localVine.alphaNumericID!);
+              successfullySynced.add(localVine.uniqueIdentifier);
               print('DEBUG: Successfully synced vine ${localVine.uniqueIdentifier}');
             }
           } catch (e) {
@@ -1790,7 +2053,7 @@ class Repository {
                 // Use syncVine method which handles both tagged and untagged vines
                 await _vineApiService.syncVine(localVine);
                 syncCount++;
-                successfullySynced.add(localVine.alphaNumericID!);
+                successfullySynced.add(localVine.uniqueIdentifier);
                 print('DEBUG: Successfully synced new vine ${localVine.uniqueIdentifier} after 404');
               } catch (createError) {
                 print('DEBUG: Failed to create vine after 404: $createError');
@@ -1909,8 +2172,22 @@ class Repository {
       
       // Collect pending vines
       final vinesToUpload = <Vine>[];
-      for (final alphaNumericId in _pendingVineChanges) {
-        final vine = await _databaseService.getVineByAlphaNumericID(alphaNumericId);
+      for (final identifier in _pendingVineChanges) {
+        // Try alphaNumericID lookup first
+        Vine? vine = await _databaseService.getVineByAlphaNumericID(identifier);
+        if (vine == null) {
+          // Try parsing as location-based identifier: vineyardName_fieldName_rowNumber_spotNumber
+          final parts = identifier.split('_');
+          if (parts.length >= 4) {
+            final spotNumber = int.tryParse(parts.last);
+            final rowNumber = int.tryParse(parts[parts.length - 2]);
+            if (spotNumber != null && rowNumber != null) {
+              final fieldName = parts[parts.length - 3];
+              final vineyardName = parts.sublist(0, parts.length - 3).join('_');
+              vine = await _databaseService.getVineByLocation(vineyardName, fieldName, rowNumber, spotNumber);
+            }
+          }
+        }
         if (vine != null) {
           vinesToUpload.add(vine);
         }
@@ -1939,15 +2216,26 @@ class Repository {
         }
       }
 
-      // Update local database with server responses
-      for (final serverVine in syncResponse.updatedVines) {
+      // Update local database with server responses, preserving local GPS
+      for (var serverVine in syncResponse.updatedVines) {
+        if (serverVine.alphaNumericID != null) {
+          final localVine = await _databaseService.getVineByAlphaNumericID(serverVine.alphaNumericID!);
+          if (localVine != null && !serverVine.hasCoordinates && localVine.hasCoordinates) {
+            serverVine = serverVine.copyWith(
+              location: serverVine.location?.copyWith(
+                latitude: localVine.location!.latitude,
+                longitude: localVine.location!.longitude,
+                gpsAccuracy: localVine.location!.gpsAccuracy,
+              ) ?? localVine.location,
+            );
+          }
+        }
         await _databaseService.updateVine(serverVine);
       }
 
       // Clear successfully synced items from pending changes
       final syncedIds = syncResponse.updatedVines
-          .where((v) => v.alphaNumericID != null)
-          .map((v) => v.alphaNumericID!)
+          .map((v) => v.uniqueIdentifier)
           .toSet();
       _pendingVineChanges.removeAll(syncedIds);
 
@@ -1996,17 +2284,46 @@ class Repository {
       }
       print('DEBUG: Delta sync contains vines from vineyards: ${vineyardsInDelta.join(', ')}');
       
-      // Update local database with server changes
-      for (final serverVine in deltaResponse.vines) {
+      // Update local database with server changes, preserving local GPS
+      for (var serverVine in deltaResponse.vines) {
         print('DEBUG: Updating vine ${serverVine.alphaNumericID} with vineyard: ${serverVine.vineyardName}');
+        if (serverVine.alphaNumericID != null) {
+          final localVine = await _databaseService.getVineByAlphaNumericID(serverVine.alphaNumericID!);
+          if (localVine != null && !serverVine.hasCoordinates && localVine.hasCoordinates) {
+            serverVine = serverVine.copyWith(
+              location: serverVine.location?.copyWith(
+                latitude: localVine.location!.latitude,
+                longitude: localVine.location!.longitude,
+                gpsAccuracy: localVine.location!.gpsAccuracy,
+              ) ?? localVine.location,
+            );
+          }
+        }
         await _databaseService.updateVine(serverVine);
         updateCount++;
       }
 
-      // Handle vine locations if we have any
+      // Apply vine location updates from server (these contain GPS data)
       for (final serverLocation in deltaResponse.vineLocations) {
-        // Update vine locations in database (we'd need to add this method)
-        print('DEBUG: Received vine location update: ${serverLocation.uniqueIdentifier}');
+        print('DEBUG: Applying vine location update: ${serverLocation.uniqueIdentifier}');
+        if (serverLocation.alphaNumericId != null && serverLocation.alphaNumericId!.isNotEmpty) {
+          final localVine = await _databaseService.getVineByAlphaNumericID(serverLocation.alphaNumericId!);
+          if (localVine != null) {
+            // Merge server location GPS into local vine
+            final updatedVine = localVine.copyWith(
+              location: localVine.location?.copyWith(
+                latitude: serverLocation.latitude ?? localVine.location?.latitude,
+                longitude: serverLocation.longitude ?? localVine.location?.longitude,
+                gpsAccuracy: serverLocation.gpsAccuracy ?? localVine.location?.gpsAccuracy,
+                vineyardName: serverLocation.vineyardName,
+                fieldName: serverLocation.fieldName,
+                rowNumber: serverLocation.rowNumber,
+                spotNumber: serverLocation.spotNumber,
+              ) ?? serverLocation,
+            );
+            await _databaseService.updateVine(updatedVine);
+          }
+        }
         updateCount++;
       }
 

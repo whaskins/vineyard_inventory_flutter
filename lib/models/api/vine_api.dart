@@ -159,6 +159,9 @@ class VineApiModel {
       'is_dead': isDead,
       // Don't send date_died in the request to avoid datetime format issues
       'date_died': null,
+      'latitude': latitude,
+      'longitude': longitude,
+      'gps_accuracy': gpsAccuracy,
     };
   }
 

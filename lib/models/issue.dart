@@ -1,6 +1,7 @@
 class VineIssue {
   final int? id;
   final int vineID;
+  final int? issueTypeID;
   final String description;
   final String? photoPath;     // Local file path (still needed for offline mode)
   final String? photoUrl;      // Remote server URL for the photo
@@ -13,6 +14,7 @@ class VineIssue {
   VineIssue({
     this.id,
     required this.vineID,
+    this.issueTypeID,
     required this.description,
     this.photoPath,
     this.photoUrl,
@@ -28,14 +30,15 @@ class VineIssue {
     return VineIssue(
       id: map['id'],
       vineID: map['vineID'],
+      issueTypeID: map['issueTypeID'],
       description: map['description'],
       photoPath: map['photoPath'],
       photoUrl: map['photoUrl'],
       dateReported: DateTime.parse(map['dateReported']),
       reportedBy: map['reportedBy'],
       isResolved: map['isResolved'] == 1,
-      dateResolved: map['dateResolved'] != null 
-        ? DateTime.parse(map['dateResolved']) 
+      dateResolved: map['dateResolved'] != null
+        ? DateTime.parse(map['dateResolved'])
         : null,
       resolvedBy: map['resolvedBy'],
     );
@@ -46,6 +49,7 @@ class VineIssue {
     return {
       'id': id,
       'vineID': vineID,
+      'issueTypeID': issueTypeID,
       'description': description,
       'photoPath': photoPath,
       'photoUrl': photoUrl,
@@ -67,6 +71,7 @@ class VineIssue {
   VineIssue copyWith({
     int? id,
     int? vineID,
+    int? issueTypeID,
     String? description,
     String? photoPath,
     String? photoUrl,
@@ -79,6 +84,7 @@ class VineIssue {
     return VineIssue(
       id: id ?? this.id,
       vineID: vineID ?? this.vineID,
+      issueTypeID: issueTypeID ?? this.issueTypeID,
       description: description ?? this.description,
       photoPath: photoPath ?? this.photoPath,
       photoUrl: photoUrl ?? this.photoUrl,

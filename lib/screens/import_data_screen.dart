@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import '../models/vine.dart';
+import '../models/vine_location.dart';
 import '../services/repository.dart';
 
 class ImportDataScreen extends StatefulWidget {
@@ -167,7 +168,18 @@ class _ImportDataScreenState extends State<ImportDataScreen> {
           
           try {
             final rowNum = int.parse(record['Row'].toString().trim());
-            updatedVine = updatedVine.copyWith(rowNumber: rowNum);
+            final loc = updatedVine.location;
+            if (loc != null) {
+              updatedVine = updatedVine.copyWith(location: VineLocation(
+                alphaNumericId: loc.alphaNumericId,
+                vineyardName: loc.vineyardName,
+                fieldName: loc.fieldName,
+                rowNumber: rowNum,
+                spotNumber: loc.spotNumber,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+              ));
+            }
             needsUpdate = true;
             _log('Will update rowNumber for $alphaNumericID: $rowNum');
           } catch (e) {

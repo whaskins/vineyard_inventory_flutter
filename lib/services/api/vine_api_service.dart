@@ -21,7 +21,7 @@ class VineApiService {
         final skip = currentPage * pageSize;
         
         // Check if the API supports pagination parameters
-        String paginatedEndpoint = '$_endpoint?skip=$skip&limit=$pageSize';
+        String paginatedEndpoint = '$_endpoint/?skip=$skip&limit=$pageSize';
         print('DEBUG: Fetching page $currentPage (skip=$skip, limit=$pageSize)');
         
         try {
@@ -216,7 +216,7 @@ class VineApiService {
           // Vine doesn't exist, proceed with creation
           print('DEBUG: Vine does not exist, proceeding with creation');
           
-          final response = await _apiService.post(_endpoint, vineApi.toJson());
+          final response = await _apiService.post('$_endpoint/', vineApi.toJson());
           print('DEBUG: Processing API response for createVine()');
           
           // Handle different API response formats
@@ -310,6 +310,11 @@ class VineApiService {
         'spot_number': vine.spotNumber,
         'year_of_planting': vine.yearOfPlanting,
         'alpha_numeric_id': null, // No tag for this vine
+        'latitude': vine.location?.latitude,
+        'longitude': vine.location?.longitude,
+        'gps_accuracy': vine.location?.gpsAccuracy,
+        'is_dead': vine.isDead,
+        'date_died': vine.dateDied?.toIso8601String(),
       };
       
       try {
@@ -393,7 +398,7 @@ class VineApiService {
           print('DEBUG: Direct get failed, trying to query all vines: $getError');
           
           // Get all vines and search for matching alphaNumericID
-          final allVines = await _apiService.get(_endpoint);
+          final allVines = await _apiService.get('$_endpoint/');
           if (allVines is List) {
             print('DEBUG: Searching through ${allVines.length} vines for matching ID');
             for (var item in allVines) {
@@ -448,7 +453,7 @@ class VineApiService {
         // Attempt to create a new vine, but handle 409 conflict properly
         print('DEBUG: Attempting to create new vine in API');
         try {
-          final createResponse = await _apiService.post(_endpoint, vineApi.toJson());
+          final createResponse = await _apiService.post('$_endpoint/', vineApi.toJson());
           print('DEBUG: Create response received');
           
           if (createResponse is Map<String, dynamic>) {
@@ -503,6 +508,29 @@ class VineApiService {
     }
   }
 
+  // Get all vine locations with coordinates (includes empty spots)
+  Future<List<Map<String, dynamic>>> getMapLocations() async {
+    try {
+      print('DEBUG: Fetching all map locations from API');
+      final response = await _apiService.get('$_endpoint/locations/map');
+
+      List<dynamic> locationsJson;
+      if (response is List) {
+        locationsJson = response;
+      } else if (response is Map && response.containsKey('data') && response['data'] is List) {
+        locationsJson = response['data'];
+      } else {
+        locationsJson = [];
+      }
+
+      print('DEBUG: API returned ${locationsJson.length} map locations');
+      return locationsJson.cast<Map<String, dynamic>>();
+    } catch (e) {
+      print('DEBUG: Error in getMapLocations: $e');
+      rethrow;
+    }
+  }
+
   // Delete a vine by ID
   Future<void> deleteVine(int id) async {
     try {
@@ -527,6 +555,37 @@ class VineApiService {
     }
   }
   
+  // Sync a vine's location data (including GPS) to the backend location endpoint.
+  // This is needed because the vine PUT endpoint only updates vine fields,
+  // not the related VineLocation record.
+  Future<void> syncLocationForVine(Vine vine) async {
+    if (vine.location == null) return;
+    final loc = vine.location!;
+    // Only sync if there's meaningful location data
+    if (loc.vineyardName.isEmpty && loc.fieldName.isEmpty &&
+        loc.latitude == null && loc.longitude == null) return;
+
+    final locationData = {
+      'alpha_numeric_id': vine.alphaNumericID,
+      'vineyard_name': loc.vineyardName,
+      'field_name': loc.fieldName,
+      'row_number': loc.rowNumber,
+      'spot_number': loc.spotNumber,
+      'latitude': loc.latitude,
+      'longitude': loc.longitude,
+      'gps_accuracy': loc.gpsAccuracy,
+    };
+
+    try {
+      print('DEBUG: Syncing location data for vine ${vine.alphaNumericID}: $locationData');
+      await _apiService.put('$_endpoint/locations/sync', locationData);
+      print('DEBUG: Location sync successful for vine ${vine.alphaNumericID}');
+    } catch (e) {
+      print('DEBUG: Error syncing location for vine ${vine.alphaNumericID}: $e');
+      // Don't rethrow — location sync failure shouldn't fail the whole operation
+    }
+  }
+
   // Create or update a vine location (for untagged vines)
   Future<Map<String, dynamic>> syncVineLocation(Map<String, dynamic> locationData) async {
     try {

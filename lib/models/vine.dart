@@ -34,7 +34,8 @@ class Vine {
     
     // Reconstruct location from flattened fields if any location data exists
     if (map['vineyardName'] != null || map['fieldName'] != null ||
-        map['rowNumber'] != null || map['spotNumber'] != null) {
+        map['rowNumber'] != null || map['spotNumber'] != null ||
+        map['latitude'] != null || map['longitude'] != null) {
       vineLocation = VineLocation(
         alphaNumericId: map['alphaNumericID'],
         vineyardName: map['vineyardName'] ?? '',

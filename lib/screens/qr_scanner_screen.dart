@@ -1,7 +1,8 @@
 import 'dart:async';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 import 'package:vibration/vibration.dart';
 import '../services/qr_scanner_service.dart';
 import '../services/repository.dart';
@@ -18,22 +19,61 @@ class QrScannerScreen extends StatefulWidget {
 }
 
 class _QrScannerScreenState extends State<QrScannerScreen> {
-  final MobileScannerController _controller = MobileScannerController();
+  CameraController? _controller;
+  final BarcodeScanner _barcodeScanner =
+      BarcodeScanner(formats: [BarcodeFormat.qrCode]);
   final Repository _repository = Repository();
   final GpsService _gpsService = GpsService();
+
   bool _isScanning = true;
   bool _hasProcessedResult = false;
   bool _isProcessing = false;
+  bool _isDetecting = false;
+  bool _isCameraReady = false;
+  bool _isFlashOn = false;
   String? _lastScannedCode;
   DateTime? _lastScanTime;
   Position? _currentPosition;
   StreamSubscription<Position>? _gpsSubscription;
   LocationEstimate? _locationEstimate;
 
+  double _currentZoom = 2.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  List<MapEntry<String, double>> _zoomPresets = [];
+
   @override
   void initState() {
     super.initState();
     _initGps();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    try {
+      final controller = await QrScannerService.initCamera();
+      if (!mounted) {
+        controller.dispose();
+        return;
+      }
+
+      final minZoom = await controller.getMinZoomLevel();
+      final maxZoom = await controller.getMaxZoomLevel();
+      final savedZoom = await QrScannerService.getSavedZoom();
+
+      setState(() {
+        _controller = controller;
+        _minZoom = minZoom;
+        _maxZoom = maxZoom;
+        _currentZoom = savedZoom.clamp(minZoom, maxZoom);
+        _zoomPresets = QrScannerService.availablePresets(minZoom, maxZoom);
+        _isCameraReady = true;
+      });
+
+      controller.startImageStream(_onCameraFrame);
+    } catch (e) {
+      debugPrint('Error initializing camera: $e');
+    }
   }
 
   Future<void> _initGps() async {
@@ -46,7 +86,6 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         _updateLocationEstimate(position);
       }
     });
-    // Also try to get an immediate position
     final pos = await _gpsService.getCurrentPosition();
     if (pos != null && mounted) {
       setState(() {
@@ -78,26 +117,45 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   void dispose() {
     _gpsSubscription?.cancel();
     _gpsService.stopTracking();
-    _controller.dispose();
+    _controller?.dispose();
+    _barcodeScanner.close();
     super.dispose();
   }
 
-  void _onQrDetect(BarcodeCapture capture) async {
-    // Prevent multiple detections
+  void _onCameraFrame(CameraImage image) {
+    if (_isDetecting || !_isScanning || _hasProcessedResult) return;
+    _isDetecting = true;
+
+    final camera = _controller!.description;
+    final inputImage =
+        QrScannerService.inputImageFromCameraImage(image, camera);
+
+    if (inputImage == null) {
+      _isDetecting = false;
+      return;
+    }
+
+    _barcodeScanner.processImage(inputImage).then((barcodes) {
+      if (barcodes.isNotEmpty && _isScanning && !_hasProcessedResult) {
+        _onQrDetect(barcodes);
+      }
+      _isDetecting = false;
+    }).catchError((e) {
+      debugPrint('Error processing barcode: $e');
+      _isDetecting = false;
+    });
+  }
+
+  void _onQrDetect(List<Barcode> barcodes) async {
     if (!_isScanning || _hasProcessedResult || _isProcessing) return;
+    if (barcodes.isEmpty) return;
 
-    if (capture.barcodes.isEmpty) return;
-
-    // Process the first barcode
-    final firstBarcode = capture.barcodes.first;
+    final firstBarcode = barcodes.first;
     final String qrValue = firstBarcode.rawValue ?? '';
-
     if (qrValue.isEmpty) return;
 
-    // Extract the vine ID from the QR value
     final String vineId = QrScannerService.extractVineId(qrValue);
 
-      // Update scan tracking information
     _lastScannedCode = vineId;
     _lastScanTime = DateTime.now();
 
@@ -106,90 +164,80 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       _isProcessing = true;
     });
 
-    // Vibrate when QR code is detected
     _triggerVibration();
-
     _pauseScanner();
 
     debugPrint('QR code scanned: $vineId');
 
-      try {
-        // Check if the vine exists in the database
-        final vine = await _repository.getVineByAlphaNumericID(vineId);
+    try {
+      final vine = await _repository.getVineByAlphaNumericID(vineId);
 
-        if (vine == null && mounted) {
-          debugPrint('Vine with ID $vineId not found, creating new vine');
+      if (vine == null && mounted) {
+        debugPrint('Vine with ID $vineId not found, creating new vine');
 
-          // Show a loading indicator
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Creating new vine record...')),
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Creating new vine record...')),
+        );
+
+        try {
+          await _repository.insertVine(
+            Vine(
+              alphaNumericID: vineId,
+              recordCreated: DateTime.now(),
+            ),
           );
 
-          // Create a new vine with minimal info
-          try {
-            await _repository.insertVine(
-              Vine(
-                alphaNumericID: vineId,
-                recordCreated: DateTime.now(),
-              ),
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('New vine record created')),
             );
-
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('New vine record created')),
-              );
-            }
-          } catch (e) {
-            debugPrint('Error creating new vine: $e');
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Error creating vine: $e')),
-              );
-            }
           }
-        } else {
-          debugPrint('Vine with ID $vineId found in database');
+        } catch (e) {
+          debugPrint('Error creating new vine: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Error creating vine: $e')),
+            );
+          }
         }
+      } else {
+        debugPrint('Vine with ID $vineId found in database');
+      }
 
-        // Navigate to the vine detail screen with GPS data
-        _navigateToVineDetail(vineId);
-      } catch (e) {
-        debugPrint('Error in QR processing: $e');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e')),
-          );
-          setState(() {
-            _isProcessing = false;
-            _hasProcessedResult = false;
-          });
-          _resumeScanner();
-        }
+      _navigateToVineDetail(vineId);
+    } catch (e) {
+      debugPrint('Error in QR processing: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+        setState(() {
+          _isProcessing = false;
+          _hasProcessedResult = false;
+        });
+        _resumeScanner();
       }
     }
+  }
 
   void _pauseScanner() {
     setState(() {
       _isScanning = false;
     });
-    _controller.stop();
+    _controller?.stopImageStream();
   }
 
   void _resumeScanner() {
     setState(() {
       _isScanning = true;
       _hasProcessedResult = false;
-      // Reset scan state
     });
-    _controller.start();
+    _controller?.startImageStream(_onCameraFrame);
   }
 
-  // Vibration feedback when a QR code is scanned
   Future<void> _triggerVibration() async {
-    // Check if vibration is available
     final bool? hasVibrator = await Vibration.hasVibrator();
     if (hasVibrator == true) {
-      // Vibrate with a pattern to simulate a "success" feedback
       Vibration.vibrate(duration: 100);
     }
   }
@@ -214,7 +262,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   }
 
   void _navigateToVineDetail(String vineId) {
-    Navigator.of(context).push(
+    Navigator.of(context)
+        .push(
       MaterialPageRoute(
         builder: (context) => VineDetailScreen(
           vineId: vineId,
@@ -223,8 +272,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           gpsAccuracy: _currentPosition?.accuracy,
         ),
       ),
-    ).then((_) {
-      // Resume scanning when returning from the detail screen
+    )
+        .then((_) {
       if (mounted) {
         setState(() {
           _isProcessing = false;
@@ -234,12 +283,30 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     });
   }
 
+  Future<void> _setZoom(double zoom) async {
+    final clamped = zoom.clamp(_minZoom, _maxZoom);
+    await _controller?.setZoomLevel(clamped);
+    await QrScannerService.saveZoom(clamped);
+    setState(() {
+      _currentZoom = clamped;
+    });
+  }
+
+  Future<void> _toggleFlash() async {
+    if (_controller == null) return;
+    final newMode = _isFlashOn ? FlashMode.off : FlashMode.torch;
+    await _controller!.setFlashMode(newMode);
+    setState(() {
+      _isFlashOn = !_isFlashOn;
+    });
+  }
+
   Widget _buildGpsStatusBadge() {
     if (_currentPosition == null) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: Colors.red.withOpacity(0.8),
+          color: Colors.red.withValues(alpha: 0.8),
           borderRadius: BorderRadius.circular(12),
         ),
         child: const Row(
@@ -247,7 +314,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           children: [
             Icon(Icons.gps_off, size: 14, color: Colors.white),
             SizedBox(width: 4),
-            Text('No GPS', style: TextStyle(color: Colors.white, fontSize: 12)),
+            Text('No GPS',
+                style: TextStyle(color: Colors.white, fontSize: 12)),
           ],
         ),
       );
@@ -270,7 +338,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: badgeColor.withOpacity(0.8),
+        color: badgeColor.withValues(alpha: 0.8),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -278,7 +346,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         children: [
           const Icon(Icons.gps_fixed, size: 14, color: Colors.white),
           const SizedBox(width: 4),
-          Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
+          Text(label,
+              style: const TextStyle(color: Colors.white, fontSize: 12)),
         ],
       ),
     );
@@ -292,7 +361,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: Colors.blue.withOpacity(0.85),
+      color: Colors.blue.withValues(alpha: 0.85),
       child: Row(
         children: [
           const Icon(Icons.location_on, color: Colors.white, size: 18),
@@ -306,6 +375,29 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildZoomSelector() {
+    if (_zoomPresets.isEmpty) return const SizedBox.shrink();
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: _zoomPresets.map((entry) {
+        final isSelected = (_currentZoom - entry.value).abs() < 0.01;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: ChoiceChip(
+            label: Text(entry.key),
+            selected: isSelected,
+            onSelected: (_) => _setZoom(entry.value),
+            selectedColor: Colors.green,
+            labelStyle: TextStyle(
+              color: isSelected ? Colors.white : null,
+              fontWeight: isSelected ? FontWeight.bold : null,
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 
@@ -326,10 +418,10 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  MobileScanner(
-                    controller: _controller,
-                    onDetect: _onQrDetect,
-                  ),
+                  if (_isCameraReady && _controller != null)
+                    CameraPreview(_controller!)
+                  else
+                    const Center(child: CircularProgressIndicator()),
                   Container(
                     width: 250,
                     height: 250,
@@ -341,7 +433,6 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
                       borderRadius: BorderRadius.circular(12.0),
                     ),
                   ),
-                  // GPS status badge in top-right corner
                   Positioned(
                     top: 12,
                     right: 12,
@@ -363,7 +454,9 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 16.0),
                   ),
-                  const SizedBox(height: 16.0),
+                  const SizedBox(height: 8.0),
+                  _buildZoomSelector(),
+                  const SizedBox(height: 8.0),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -377,11 +470,10 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
                         ),
                       ),
                       ElevatedButton.icon(
-                        onPressed: () {
-                          _controller.toggleTorch();
-                        },
-                        icon: const Icon(Icons.flashlight_on),
-                        label: const Text('Toggle Flash'),
+                        onPressed: _toggleFlash,
+                        icon: Icon(
+                            _isFlashOn ? Icons.flash_off : Icons.flash_on),
+                        label: Text(_isFlashOn ? 'Flash Off' : 'Flash On'),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.grey[800],
                           foregroundColor: Colors.white,

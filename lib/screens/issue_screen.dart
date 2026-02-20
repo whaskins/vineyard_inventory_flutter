@@ -5,7 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'dart:io';
 import '../models/issue.dart';
-import '../services/database_service.dart';
+import '../models/issue_type.dart';
 import '../services/repository.dart';
 import '../services/api/authenticated_image.dart';
 import 'image_viewer_screen.dart';
@@ -21,16 +21,17 @@ class IssueScreen extends StatefulWidget {
 
 class _IssueScreenState extends State<IssueScreen> {
   final _formKey = GlobalKey<FormBuilderState>();
-  final _databaseService = DatabaseService();
   final _repository = Repository();
   final _imagePicker = ImagePicker();
   
   bool _isLoading = true;
   bool _isSubmitting = false;
   List<VineIssue> _issues = [];
+  List<IssueType> _issueTypes = [];
+  int? _selectedIssueTypeId;
   String? _errorMessage;
   String? _selectedImagePath;
-  
+
   // Mocked user ID (in a real app, this would come from authentication)
   final int _currentUserId = 1;
 
@@ -38,6 +39,20 @@ class _IssueScreenState extends State<IssueScreen> {
   void initState() {
     super.initState();
     _loadIssues();
+    _loadIssueTypes();
+  }
+
+  Future<void> _loadIssueTypes() async {
+    try {
+      final types = await _repository.getAllIssueTypes();
+      if (mounted) {
+        setState(() {
+          _issueTypes = types;
+        });
+      }
+    } catch (e) {
+      print('Error loading issue types: $e');
+    }
   }
 
   Future<void> _loadIssues() async {
@@ -91,6 +106,7 @@ class _IssueScreenState extends State<IssueScreen> {
         // Create issue
         final issue = VineIssue(
           vineID: widget.vineId,
+          issueTypeID: _selectedIssueTypeId,
           description: formValues['description'],
           photoPath: _selectedImagePath,
           dateReported: DateTime.now(),
@@ -105,6 +121,7 @@ class _IssueScreenState extends State<IssueScreen> {
         _formKey.currentState?.reset();
         setState(() {
           _selectedImagePath = null;
+          _selectedIssueTypeId = null;
         });
         await _loadIssues();
         
@@ -166,6 +183,73 @@ class _IssueScreenState extends State<IssueScreen> {
     }
   }
 
+  Future<void> _showAddIssueTypeDialog() async {
+    final nameController = TextEditingController();
+    final descController = TextEditingController();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add Issue Type'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Type Name',
+                border: OutlineInputBorder(),
+              ),
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: descController,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == true && nameController.text.trim().isNotEmpty) {
+      try {
+        final newType = await _repository.createIssueType(IssueType(
+          name: nameController.text.trim(),
+          description: descController.text.trim().isEmpty
+              ? null
+              : descController.text.trim(),
+        ));
+        await _loadIssueTypes();
+        setState(() {
+          _selectedIssueTypeId = newType.id;
+        });
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error creating issue type: $e')),
+          );
+        }
+      }
+    }
+
+    nameController.dispose();
+    descController.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     return _isLoading
@@ -213,6 +297,38 @@ class _IssueScreenState extends State<IssueScreen> {
                               key: _formKey,
                               child: Column(
                                 children: [
+                                  // Issue type dropdown
+                                  DropdownButtonFormField<int?>(
+                                    value: _selectedIssueTypeId,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Issue Type',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    items: [
+                                      const DropdownMenuItem<int?>(
+                                        value: null,
+                                        child: Text('Select type (optional)'),
+                                      ),
+                                      ..._issueTypes.map((type) => DropdownMenuItem<int?>(
+                                            value: type.id,
+                                            child: Text(type.name),
+                                          )),
+                                      const DropdownMenuItem<int?>(
+                                        value: -1,
+                                        child: Text('+ Add New Type...'),
+                                      ),
+                                    ],
+                                    onChanged: (value) {
+                                      if (value == -1) {
+                                        _showAddIssueTypeDialog();
+                                      } else {
+                                        setState(() {
+                                          _selectedIssueTypeId = value;
+                                        });
+                                      }
+                                    },
+                                  ),
+                                  const SizedBox(height: 16),
                                   FormBuilderTextField(
                                     name: 'description',
                                     decoration: const InputDecoration(
@@ -387,6 +503,21 @@ class _IssueScreenState extends State<IssueScreen> {
                                 subtitle: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
+                                    if (issue.issueTypeID != null)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 4),
+                                        child: Chip(
+                                          label: Text(
+                                            _issueTypes
+                                                .where((t) => t.id == issue.issueTypeID)
+                                                .map((t) => t.name)
+                                                .firstOrNull ?? 'Type #${issue.issueTypeID}',
+                                            style: const TextStyle(fontSize: 12),
+                                          ),
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                        ),
+                                      ),
                                     const SizedBox(height: 4),
                                     Text(
                                       'Reported: ${DateFormat('yyyy-MM-dd').format(issue.dateReported)}',
